@@ -131,7 +131,55 @@ pub fn casks_for_app(app_name: &str) -> Vec<String> {
     found
 }
 
+/// The apps a cask installs, as paths relative to /Applications, read from
+/// its definition in the local taps (the `target:` path when it has one).
+pub fn apps_of_cask(token: &str) -> Vec<String> {
+    let mut apps = Vec::new();
+    let taps = crate::util::sys("/opt/homebrew/Library/Taps");
+    walk_casks_named(&taps, Some(short(token)), &mut |_, text| {
+        apps.extend(app_stanzas(text));
+    });
+    apps.sort();
+    apps.dedup();
+    apps
+}
+
+/// `app "X.app"` and `app "X.app", target: "Y.app"` lines in a cask file.
+fn app_stanzas(text: &str) -> Vec<String> {
+    let quoted = |s: &str| -> Option<String> {
+        let start = s.find('"')? + 1;
+        let len = s[start..].find('"')?;
+        Some(s[start..start + len].to_string())
+    };
+    text.lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("app "))
+        .filter_map(|rest| match rest.find("target:") {
+            Some(i) => quoted(&rest[i..]),
+            None => quoted(rest).map(|name| name.rsplit('/').next().unwrap_or(&name).to_string()),
+        })
+        .collect()
+}
+
+/// An App Store app's store ID, which `mas` installs it by, from its
+/// Spotlight metadata.
+pub fn app_store_id(app: &Path) -> Option<i64> {
+    let path = app.to_string_lossy();
+    let out = run(
+        &["mdls", "-raw", "-name", "kMDItemAppStoreAdamID", &path],
+        None,
+        Duration::from_secs(10),
+    )
+    .ok()?;
+    out.stdout.trim().parse::<i64>().ok().filter(|id| *id > 0)
+}
+
 fn walk_casks(dir: &Path, f: &mut dyn FnMut(&Path, &str)) {
+    walk_casks_named(dir, None, f)
+}
+
+/// Like `walk_casks`, but with `token`, only reads the cask file of that name.
+fn walk_casks_named(dir: &Path, token: Option<&str>, f: &mut dyn FnMut(&Path, &str)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -139,8 +187,9 @@ fn walk_casks(dir: &Path, f: &mut dyn FnMut(&Path, &str)) {
         let p = e.path();
         // Follow symlinks: nix-homebrew's Taps folder is one.
         if std::fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false) {
-            walk_casks(&p, f);
+            walk_casks_named(&p, token, f);
         } else if p.extension().is_some_and(|x| x == "rb")
+            && token.is_none_or(|t| p.file_stem().is_some_and(|s| s == t))
             && p.components().any(|c| c.as_os_str() == "Casks")
             && let Ok(text) = std::fs::read_to_string(&p)
         {
@@ -152,6 +201,12 @@ fn walk_casks(dir: &Path, f: &mut dyn FnMut(&Path, &str)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cask_app_stanzas() {
+        let text = "cask \"foo\" do\n  app \"Foo.app\"\n  app \"Foo Helper.app\", target: \"Foo Tools/Helper.app\"\n  binary \"#{appdir}/Foo.app/Contents/MacOS/foo\"\nend\n";
+        assert_eq!(app_stanzas(text), ["Foo.app", "Foo Tools/Helper.app"]);
+    }
 
     #[test]
     fn parses_nix_darwin_brewfile() {

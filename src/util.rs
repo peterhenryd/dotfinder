@@ -47,6 +47,15 @@ pub fn state_dir() -> PathBuf {
     }
 }
 
+/// Data that belongs to this Mac's user rather than to the config, such as
+/// private ignore rules.
+pub fn data_dir() -> PathBuf {
+    match std::env::var_os("XDG_DATA_HOME") {
+        Some(p) if !p.is_empty() => PathBuf::from(p).join("dotfinder"),
+        _ => home().join(".local/share/dotfinder"),
+    }
+}
+
 /// FNV-1a, 64-bit. Used to notice changes, never for security.
 pub fn fnv64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;

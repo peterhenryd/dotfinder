@@ -1,11 +1,11 @@
-//! Files dotfinder keeps: baselines in the state directory, and the two
-//! files it writes into the dotfiles repo.
+//! Files dotfinder keeps: baselines in the state directory, the two files it
+//! writes into the dotfiles repo, and private ignore rules kept outside it.
 
 use crate::config::Config;
 use crate::diff::{Ignores, builtin_ignores};
 use crate::json::{self, Value};
 use crate::snapshot::Snapshot;
-use crate::util::{state_dir, write_atomic};
+use crate::util::{data_dir, state_dir, write_atomic};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -66,7 +66,8 @@ fn read_json(path: &Path) -> Result<Value, String> {
     }
 }
 
-/// Built-in rules, the config's rules, and the ones `adopt` saved.
+/// Built-in rules, the config's rules, and the ones `adopt` saved, both
+/// public and private.
 pub fn ignores(cfg: &Config) -> Result<Ignores, String> {
     let mut patterns = if cfg.builtin_ignores {
         builtin_ignores()
@@ -75,25 +76,45 @@ pub fn ignores(cfg: &Config) -> Result<Ignores, String> {
     };
     patterns.extend(cfg.ignore.iter().cloned());
     patterns.extend(IgnoredFile::load(cfg)?.patterns);
+    patterns.extend(IgnoredFile::load_private()?.patterns);
     Ok(Ignores { patterns })
 }
 
-/// `dotfinder/ignored.json` in the dotfiles repo: `{"ignore": [patterns]}`.
+/// Where private ignore rules are kept: outside the dotfiles repo, so the
+/// names of what they hide aren't published.
+pub fn private_ignored_path() -> PathBuf {
+    data_dir().join("ignored.json")
+}
+
+/// Ignore rules, `{"ignore": [patterns]}`: `dotfinder/ignored.json` in the
+/// dotfiles repo, or the private file outside it.
 pub struct IgnoredFile {
     path: PathBuf,
+    private: bool,
     pub patterns: Vec<String>,
 }
 
 impl IgnoredFile {
     pub fn load(cfg: &Config) -> Result<IgnoredFile, String> {
-        let path = cfg.ignored_path();
+        Self::load_from(cfg.ignored_path(), false)
+    }
+
+    pub fn load_private() -> Result<IgnoredFile, String> {
+        Self::load_from(private_ignored_path(), true)
+    }
+
+    fn load_from(path: PathBuf, private: bool) -> Result<IgnoredFile, String> {
         let v = read_json(&path)?;
         let patterns = v
             .get("ignore")
             .and_then(Value::as_arr)
             .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
             .unwrap_or_default();
-        Ok(IgnoredFile { path, patterns })
+        Ok(IgnoredFile {
+            path,
+            private,
+            patterns,
+        })
     }
 
     pub fn add(&mut self, pattern: String) {
@@ -110,16 +131,26 @@ impl IgnoredFile {
             "ignore".into(),
             Value::Arr(self.patterns.iter().cloned().map(Value::Str).collect()),
         );
-        write_atomic(&self.path, Value::Obj(o).to_pretty().as_bytes())
+        write_atomic(&self.path, Value::Obj(o).to_pretty().as_bytes())?;
+        if self.private {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
     }
 }
 
 /// `dotfinder/adopted.json` in the dotfiles repo, read by the dotfiles Nix
-/// module: `{"casks": [], "brews": [], "defaults": {domain: {key: value}}}`.
+/// module: `{"casks": [], "brews": [], "masApps": {name: id},
+/// "manualApps": [], "defaults": {domain: {key: value}}}`.
+/// `manualApps` are apps nothing can install, listed so a new Mac's audit
+/// names them.
 pub struct AdoptedFile {
     path: PathBuf,
     pub casks: Vec<String>,
     pub brews: Vec<String>,
+    pub mas_apps: BTreeMap<String, i64>,
+    pub manual_apps: Vec<String>,
     pub defaults: BTreeMap<String, Value>,
 }
 
@@ -136,6 +167,16 @@ impl AdoptedFile {
         Ok(AdoptedFile {
             casks: list("casks"),
             brews: list("brews"),
+            mas_apps: v
+                .get("masApps")
+                .and_then(Value::as_obj)
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| v.as_i64().map(|id| (k.clone(), id)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            manual_apps: list("manualApps"),
             defaults: v
                 .get("defaults")
                 .and_then(Value::as_obj)
@@ -152,11 +193,23 @@ impl AdoptedFile {
         }
     }
 
+    /// Names of the apps this file accounts for without a cask: App Store
+    /// apps and apps to install by hand.
+    pub fn known_app_names(&self) -> Vec<String> {
+        self.mas_apps
+            .keys()
+            .chain(self.manual_apps.iter())
+            .cloned()
+            .collect()
+    }
+
     pub fn save(&mut self) -> std::io::Result<()> {
         self.casks.sort();
         self.casks.dedup();
         self.brews.sort();
         self.brews.dedup();
+        self.manual_apps.sort();
+        self.manual_apps.dedup();
         let mut o = BTreeMap::new();
         o.insert(
             "casks".into(),
@@ -165,6 +218,19 @@ impl AdoptedFile {
         o.insert(
             "brews".into(),
             Value::Arr(self.brews.iter().cloned().map(Value::Str).collect()),
+        );
+        o.insert(
+            "masApps".into(),
+            Value::Obj(
+                self.mas_apps
+                    .iter()
+                    .map(|(k, id)| (k.clone(), Value::Int(*id)))
+                    .collect(),
+            ),
+        );
+        o.insert(
+            "manualApps".into(),
+            Value::Arr(self.manual_apps.iter().cloned().map(Value::Str).collect()),
         );
         o.insert("defaults".into(), Value::Obj(self.defaults.clone()));
         write_atomic(&self.path, Value::Obj(o).to_pretty().as_bytes())
@@ -201,5 +267,52 @@ impl VaultState {
         let mut root = BTreeMap::new();
         root.insert("files".into(), Value::Obj(files));
         write_atomic(&self.path, Value::Obj(root).to_pretty().as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dotfinder-state-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn adopted_round_trip() {
+        let dir = temp("adopted");
+        let cfg =
+            Config::from_value(&json::parse(&format!(r#"{{"dotfiles":"{}"}}"#, dir.display())).unwrap())
+                .unwrap();
+        let mut a = AdoptedFile::load(&cfg).unwrap();
+        a.casks.push("ghostty".into());
+        a.mas_apps.insert("Things 3".into(), 904280696);
+        a.manual_apps.extend(["Zed".to_string(), "Zed".to_string()]);
+        a.save().unwrap();
+        let b = AdoptedFile::load(&cfg).unwrap();
+        assert_eq!(b.casks, ["ghostty"]);
+        assert_eq!(b.mas_apps.get("Things 3"), Some(&904280696));
+        assert_eq!(b.manual_apps, ["Zed"]);
+        assert_eq!(b.known_app_names(), ["Things 3", "Zed"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn private_ignores_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp("private");
+        let path = dir.join("ignored.json");
+        let mut f = IgnoredFile::load_from(path.clone(), true).unwrap();
+        f.add("apps:/Applications/Secret.app".into());
+        f.save().unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            IgnoredFile::load_from(path, true).unwrap().patterns,
+            ["apps:/Applications/Secret.app"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

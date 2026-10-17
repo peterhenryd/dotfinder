@@ -129,7 +129,10 @@ pub fn audit_list(cfg: &Config, show_all: bool) -> Result<(Vec<Change>, usize, O
         .filter(|w| !w.audit)
         .map(|w| format!("dir:{}", w.path))
         .collect();
-    let all = audit_findings(&now, declared.as_ref(), &skip);
+    let known_apps = AdoptedFile::load(cfg)
+        .map(|a| a.known_app_names())
+        .unwrap_or_default();
+    let all = audit_findings(&now, declared.as_ref(), &skip, &known_apps);
     let total = all.len();
     let shown: Vec<Change> = all
         .into_iter()
@@ -148,6 +151,18 @@ pub fn audit(cfg: &Config, show_all: bool) -> Result<(), String> {
         );
     } else {
         print_audit(&shown, &|name| brew::casks_for_app(name));
+    }
+
+    let missing = missing_manual_apps(cfg);
+    if !missing.is_empty() {
+        heading("To install by hand");
+        for name in &missing {
+            println!("  {} {name}", yellow("!"));
+        }
+        println!(
+            "  {}",
+            dim("Listed in dotfinder/adopted.json as apps nothing installs automatically.")
+        );
     }
 
     let pending = crate::vault::pending(cfg);
@@ -189,6 +204,24 @@ pub fn audit(cfg: &Config, show_all: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Apps the config lists as installed by hand that aren't on this Mac.
+fn missing_manual_apps(cfg: &Config) -> Vec<String> {
+    let Ok(adopted) = AdoptedFile::load(cfg) else {
+        return Vec::new();
+    };
+    let dirs = [
+        util::sys("/Applications"),
+        util::sys("/Applications/Utilities"),
+        util::expand("~/Applications"),
+    ];
+    adopted
+        .manual_apps
+        .iter()
+        .filter(|name| !dirs.iter().any(|d| d.join(format!("{name}.app")).exists()))
+        .cloned()
+        .collect()
+}
+
 /// Before a switch: Homebrew packages installed but not declared, which the
 /// switch's cleanup step would uninstall. Returns false to abort.
 fn preflight(cfg: &Config) -> Result<bool, String> {
@@ -223,6 +256,9 @@ fn preflight(cfg: &Config) -> Result<bool, String> {
         .filter(|n| !n.is_empty() && !declared.declares_cask(n))
         .map(str::to_string)
         .collect();
+    if !in_the_way(&declared, &casks.stdout)? {
+        return Ok(false);
+    }
     if undeclared_brews.is_empty() && undeclared_casks.is_empty() {
         return Ok(true);
     }
@@ -262,6 +298,50 @@ fn preflight(cfg: &Config) -> Result<bool, String> {
         Some('c') => Ok(true),
         _ => Ok(false),
     }
+}
+
+/// Declared casks that aren't installed yet but whose app already is, from
+/// the App Store or by hand. Homebrew won't install over those, so the
+/// switch would stop at them. Returns false to abort.
+fn in_the_way(declared: &Brewfile, installed_casks: &str) -> Result<bool, String> {
+    let installed: Vec<&str> = installed_casks.lines().map(str::trim).collect();
+    let blocked: Vec<(String, String)> = declared
+        .casks
+        .iter()
+        .filter(|c| !installed.contains(&brew::short(c)))
+        .flat_map(|c| {
+            brew::apps_of_cask(c)
+                .into_iter()
+                .filter(|app| util::sys("/Applications").join(app).exists())
+                .map(move |app| (brew::short(c).to_string(), app))
+        })
+        .collect();
+    if blocked.is_empty() {
+        return Ok(true);
+    }
+    println!(
+        "\n{}",
+        bold("These apps are already installed outside Homebrew, so their casks can't install:")
+    );
+    for (cask, app) in &blocked {
+        println!(
+            "  {} /Applications/{app} {}",
+            yellow("!"),
+            dim(&format!("(cask {cask})"))
+        );
+    }
+    println!(
+        "  {}",
+        dim("Quit each one and move it to the Trash, then rebuild. Their data in ~/Library stays.")
+    );
+    let answer = choose(
+        "\nWhat now?",
+        &[
+            ('c', "continue anyway (Homebrew reports those casks as failed)"),
+            ('q', "stop"),
+        ],
+    );
+    Ok(answer == Some('c'))
 }
 
 fn qualify(tap: Option<&str>, name: &str) -> String {

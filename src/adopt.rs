@@ -9,7 +9,7 @@ use crate::json::Value;
 use crate::report::{describe, marker, section_label};
 use crate::state::{AdoptedFile, IgnoredFile};
 use crate::term::{bold, choose, dim, yellow};
-use crate::util::tilde;
+use crate::util::{expand, tilde};
 
 /// Why a preference value can't go into the config, if it can't.
 fn unadoptable(key: &str, v: &Value) -> Option<&'static str> {
@@ -66,8 +66,21 @@ pub fn looks_secret(key: &str, v: &Value) -> bool {
 }
 
 const IGNORE: (char, &str) = ('i', "ignore from now on");
+const PRIVATE: (char, &str) = ('p', "ignore privately");
 const SKIP: (char, &str) = ('s', "skip for now");
 const QUIT: (char, &str) = ('q', "save and quit");
+
+/// The name to add to the config for a Homebrew package, with its tap
+/// when it isn't Homebrew's own. Errors when the tap isn't in the config.
+fn brew_entry(cask: bool, name: &str, declared: Option<&Brewfile>) -> Result<String, String> {
+    match brew::tap_of(cask, name) {
+        Some(tap) if declared.is_some_and(|bf| !brew::tap_declared(bf, &tap)) => Err(format!(
+            "It comes from the tap `{tap}`, which the config doesn't include. Add the tap as a flake input in flake.nix and modules/darwin/homebrew.nix first."
+        )),
+        Some(tap) if tap != "homebrew/core" && tap != "homebrew/cask" => Ok(format!("{tap}/{name}")),
+        _ => Ok(name.to_string()),
+    }
+}
 
 pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>) -> Result<(), String> {
     if changes.is_empty() {
@@ -76,7 +89,8 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
     }
     let mut adopted = AdoptedFile::load(cfg)?;
     let mut ignored = IgnoredFile::load(cfg)?;
-    let (mut n_adopted, mut n_ignored) = (0, 0);
+    let mut private = IgnoredFile::load_private()?;
+    let (mut n_adopted, mut n_ignored, mut n_private) = (0, 0, 0);
     let mut ignored_parents: Vec<String> = Vec::new();
 
     changes.sort_by(|a, b| a.section.cmp(&b.section).then(a.item.cmp(&b.item)));
@@ -97,6 +111,17 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
         let mut note: Option<String> = None;
         let section = c.section.as_str();
         let value = c.new.as_ref();
+        // For apps: the bundle's name without ".app", a cask that installs
+        // it, and its App Store ID.
+        let app_name = c
+            .item
+            .rsplit('/')
+            .next()
+            .unwrap_or(&c.item)
+            .trim_end_matches(".app")
+            .to_string();
+        let mut app_cask: Option<String> = None;
+        let mut app_store_id: Option<i64> = None;
 
         match (section, c.kind, &c.key) {
             ("homebrew-casks" | "homebrew-formulae", Kind::Added, None) => {
@@ -141,17 +166,35 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                     .and_then(|v| v.get("source"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if source == "manual" {
-                    let name = c.item.rsplit('/').next().unwrap_or(&c.item);
-                    let casks = brew::casks_for_app(name);
-                    note = Some(if casks.is_empty() {
-                        "Installed by hand, and no cask installs it.".into()
-                    } else {
-                        format!(
-                            "Installed by hand. To manage it with Homebrew: quit it, move it to the Trash, add the cask `{}` to modules/darwin/homebrew.nix, and rebuild.",
-                            casks[0]
-                        )
-                    });
+                if matches!(source, "manual" | "app-store") {
+                    app_cask = brew::casks_for_app(&format!("{app_name}.app")).into_iter().next();
+                    if source == "app-store" {
+                        app_store_id = brew::app_store_id(&expand(&c.item));
+                    }
+                    let mut lines: Vec<String> = Vec::new();
+                    match &app_cask {
+                        Some(cask) => lines.push(format!("Homebrew has it as the cask `{cask}`.")),
+                        None if source == "manual" => {
+                            lines.push("Installed by hand, and no cask installs it.".into())
+                        }
+                        None => {}
+                    }
+                    if source == "app-store" && app_store_id.is_none() {
+                        lines.push(
+                            "Its App Store ID couldn't be read, so it can't be added from the App Store."
+                                .into(),
+                        );
+                    }
+                    if !lines.is_empty() {
+                        note = Some(lines.join(" "));
+                    }
+                    if app_cask.is_some() {
+                        options.push(('c', "use the cask"));
+                    }
+                    if app_store_id.is_some() {
+                        options.push(('m', "add it from the App Store"));
+                    }
+                    options.push(('n', "list it as an app to install by hand"));
                 }
             }
             (s, Kind::Added, None) if s.starts_with("dir:") => {
@@ -178,6 +221,7 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
             println!("  {}", yellow(n));
         }
         options.push(IGNORE);
+        options.push(PRIVATE);
         options.push(SKIP);
         options.push(QUIT);
 
@@ -188,29 +232,15 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
             'a' => match (section, &c.key) {
                 ("homebrew-casks" | "homebrew-formulae", None) => {
                     let cask = section == "homebrew-casks";
-                    match brew::tap_of(cask, &c.item) {
-                        Some(tap) if declared.is_some_and(|bf| !brew::tap_declared(bf, &tap)) => {
-                            println!(
-                                "  {}",
-                                yellow(&format!(
-                                    "It comes from the tap `{tap}`, which the config doesn't include. Add the tap as a flake input in flake.nix and modules/darwin/homebrew.nix first."
-                                ))
-                            );
+                    match brew_entry(cask, &c.item, declared) {
+                        Err(why) => {
+                            println!("  {}", yellow(&why));
                             continue;
                         }
-                        tap => {
-                            let name = match tap.as_deref() {
-                                Some("homebrew/core" | "homebrew/cask") | None => c.item.clone(),
-                                Some(t) => format!("{t}/{}", c.item),
-                            };
-                            if cask {
-                                adopted.casks.push(name)
-                            } else {
-                                adopted.brews.push(name)
-                            }
-                            n_adopted += 1;
-                        }
+                        Ok(name) if cask => adopted.casks.push(name),
+                        Ok(name) => adopted.brews.push(name),
                     }
+                    n_adopted += 1;
                 }
                 ("defaults", Some(k)) => {
                     adopted.set_default(&c.item, k, value.unwrap().clone());
@@ -239,9 +269,46 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                 }
                 _ => {}
             },
+            'c' => {
+                let cask = app_cask.clone().unwrap_or_default();
+                match brew_entry(true, &cask, declared) {
+                    Err(why) => {
+                        println!("  {}", yellow(&why));
+                        continue;
+                    }
+                    Ok(name) => adopted.casks.push(name),
+                }
+                n_adopted += 1;
+                println!(
+                    "  {}",
+                    dim(&format!(
+                        "Before the next rebuild, quit {app_name} and move it to the Trash, so Homebrew can install its own copy. Its data in ~/Library stays."
+                    ))
+                );
+            }
+            'm' => {
+                if let Some(id) = app_store_id {
+                    adopted.mas_apps.insert(app_name.clone(), id);
+                    n_adopted += 1;
+                    println!(
+                        "  {}",
+                        dim(
+                            "Rebuilds install it with `mas` while you're signed in to the App Store. The copy here stays as it is."
+                        )
+                    );
+                }
+            }
+            'n' => {
+                adopted.manual_apps.push(app_name.clone());
+                n_adopted += 1;
+            }
             'i' => {
                 ignored.add(c.id());
                 n_ignored += 1;
+            }
+            'p' => {
+                private.add(c.id());
+                n_private += 1;
             }
             'd' => {
                 ignored.add(c.parent_id());
@@ -259,11 +326,25 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
     ignored
         .save()
         .map_err(|e| format!("{}: {e}", cfg.ignored_path().display()))?;
-    println!("\n{n_adopted} added to the config, {n_ignored} ignored.");
+    if n_private > 0 {
+        private
+            .save()
+            .map_err(|e| format!("{}: {e}", crate::state::private_ignored_path().display()))?;
+    }
+    println!("\n{n_adopted} added to the config, {n_ignored} ignored, {n_private} ignored privately.");
+    if n_private > 0 {
+        println!(
+            "{}",
+            dim(&format!(
+                "Private ignore rules are in {}, outside the repo.",
+                tilde(&crate::state::private_ignored_path())
+            ))
+        );
+    }
     if n_adopted > 0 {
         println!(
             "Apply them with {}. Then commit {} in your dotfiles repo.",
-            bold("rebuild"),
+            bold("dotfinder rebuild"),
             bold("dotfinder/")
         );
     } else if n_ignored > 0 {

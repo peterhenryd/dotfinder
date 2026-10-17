@@ -177,7 +177,14 @@ pub fn print_changes(changes: &[Change], declared: Option<&Brewfile>) {
 /// Everything on the machine that the config doesn't capture, as
 /// "added" changes so `adopt --audit` can walk through them.
 /// `skip_sections`: sections the audit leaves out (folders with `audit: false`).
-pub fn audit_findings(s: &Snapshot, declared: Option<&Brewfile>, skip_sections: &[String]) -> Vec<Change> {
+/// `known_apps`: app names the config lists without a cask (App Store apps
+/// and apps to install by hand).
+pub fn audit_findings(
+    s: &Snapshot,
+    declared: Option<&Brewfile>,
+    skip_sections: &[String],
+    known_apps: &[String],
+) -> Vec<Change> {
     let mut out = Vec::new();
     let add = |out: &mut Vec<Change>, section: &str, item: &str, v: &Value| {
         out.push(Change {
@@ -197,10 +204,13 @@ pub fn audit_findings(s: &Snapshot, declared: Option<&Brewfile>, skip_sections: 
             let include = match name.as_str() {
                 "homebrew-casks" => declared.is_some_and(|bf| !bf.declares_cask(item)),
                 "homebrew-formulae" => declared.is_some_and(|bf| !bf.declares_brew(item)),
-                "apps" => matches!(
-                    v.get("source").and_then(Value::as_str),
-                    Some("manual" | "app-store")
-                ),
+                "apps" => {
+                    let name = item.rsplit('/').next().unwrap_or(item).trim_end_matches(".app");
+                    matches!(
+                        v.get("source").and_then(Value::as_str),
+                        Some("manual" | "app-store")
+                    ) && !known_apps.iter().any(|k| k == name)
+                }
                 n if n.starts_with("dir:") => v.get("managed") == Some(&Value::Bool(false)),
                 n if n.starts_with("cmd:") => n != "cmd:login-items" && n != "cmd:rustup-toolchain",
                 _ => false,
@@ -239,11 +249,13 @@ pub fn print_audit(findings: &[Change], cask_hint: &dyn Fn(&str) -> Vec<String>)
         }
         println!("  {} {}", cyan("•"), describe(c));
         if c.section == "apps"
-            && c.new
-                .as_ref()
-                .and_then(|v| v.get("source"))
-                .and_then(Value::as_str)
-                == Some("manual")
+            && matches!(
+                c.new
+                    .as_ref()
+                    .and_then(|v| v.get("source"))
+                    .and_then(Value::as_str),
+                Some("manual" | "app-store")
+            )
         {
             let name = c.item.rsplit('/').next().unwrap_or(&c.item);
             let casks = cask_hint(name);
@@ -254,5 +266,47 @@ pub fn print_audit(findings: &[Change], cask_hint: &dyn Fn(&str) -> Vec<String>)
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot::Section;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn listed_apps_are_not_findings() {
+        let app = |source: &str| {
+            let mut o = BTreeMap::new();
+            o.insert("source".to_string(), Value::Str(source.into()));
+            Value::Obj(o)
+        };
+        let mut items = BTreeMap::new();
+        items.insert("/Applications/Things 3.app".to_string(), app("app-store"));
+        items.insert("/Applications/Zed.app".to_string(), app("manual"));
+        items.insert("/Applications/Other.app".to_string(), app("manual"));
+        items.insert("/Applications/Ghostty.app".to_string(), app("homebrew:ghostty"));
+        let mut sections = BTreeMap::new();
+        sections.insert(
+            "apps".to_string(),
+            Section {
+                available: true,
+                note: None,
+                items,
+            },
+        );
+        let s = Snapshot {
+            taken_at: 0,
+            kind: "manual".into(),
+            generation: None,
+            sections,
+        };
+        let known = ["Things 3".to_string(), "Zed".to_string()];
+        let found: Vec<String> = audit_findings(&s, None, &[], &known)
+            .into_iter()
+            .map(|c| c.item)
+            .collect();
+        assert_eq!(found, ["/Applications/Other.app"]);
     }
 }

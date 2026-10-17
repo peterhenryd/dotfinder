@@ -33,7 +33,7 @@ matches the config. Anything that differs later is drift.
 | `dotfinder rebuild` | Warns about Homebrew packages the switch would uninstall, runs `darwin-rebuild switch`, then records a new baseline |
 | `dotfinder drift` | What changed since the baseline |
 | `dotfinder audit` | Everything the config doesn't capture, changed recently or not |
-| `dotfinder adopt` | Walks through drift one change at a time: add it to the config, or ignore it from then on |
+| `dotfinder adopt` | Walks through drift one change at a time: add it to the config, or ignore it from then on, publicly or privately |
 | `dotfinder adopt --audit` | The same, for audit findings |
 | `dotfinder baseline` | Records the current state as the baseline |
 | `dotfinder vault status / backup / restore` | Keeps the configured private files in the vault |
@@ -46,12 +46,30 @@ matches the config. Anything that differs later is drift.
 `adopt` never edits hand-written Nix. It writes two JSON files into the
 dotfiles repo:
 
-- `dotfinder/adopted.json`: casks, formulae and preferences to add. A small
-  Nix module reads it into `homebrew.casks`, `homebrew.brews` and
+- `dotfinder/adopted.json`: casks, formulae, App Store apps (`masApps`, by
+  store ID), apps to install by hand (`manualApps`, names only) and
+  preferences. A small Nix module reads it into `homebrew.casks`,
+  `homebrew.brews`, `homebrew.masApps` and
   `system.defaults.CustomUserPreferences`.
 - `dotfinder/ignored.json`: ignore rules.
 
 Both must be tracked by git, or the flake can't see them.
+
+Ignoring something privately (`p` in `adopt`) writes the rule to
+`~/.local/share/dotfinder/ignored.json` instead, outside the repo, so the
+name of what it hides isn't published. Back that file up with the vault.
+
+## Apps
+
+For an app installed from the App Store or by hand, `adopt` offers:
+
+- the Homebrew cask that installs it, when one exists. Quit the app and
+  move it to the Trash before the next rebuild, so Homebrew can install its
+  own copy; `dotfinder rebuild` stops to say so if one is still in the way.
+- adding it from the App Store, by its store ID. Rebuilds install it with
+  `mas` while you're signed in to the App Store.
+- listing it as an app to install by hand. `audit` then names it on any Mac
+  where it's missing.
 
 A minimal module:
 
@@ -63,7 +81,8 @@ let
 in
 {
   homebrew.casks = adopted.casks or [ ];
-  homebrew.brews = adopted.brews or [ ];
+  homebrew.brews = adopted.brews or [ ] ++ lib.optional ((adopted.masApps or { }) != { }) "mas";
+  homebrew.masApps = adopted.masApps or { };
   system.defaults.CustomUserPreferences = adopted.defaults or { };
 }
 ```
