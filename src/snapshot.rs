@@ -530,11 +530,19 @@ fn dir_section(path: &str, hidden_only: bool, dotfiles: &Path) -> Section {
                 );
             }
         } else {
-            o.insert("managed".into(), Value::Bool(is_managed_link(&p, &dotfiles)));
+            o.insert("managed".into(), Value::Bool(is_managed(&p, &dotfiles)));
         }
         items.insert(name, Value::Obj(o));
     }
     Section::ok(items)
+}
+
+/// Where nix-darwin keeps the files it copies into the home folder (user
+/// launch agents) for the current system generation.
+const DARWIN_USER_FILES: &str = "/run/current-system/user";
+
+fn is_managed(p: &Path, dotfiles: &Path) -> bool {
+    is_managed_link(p, dotfiles) || is_darwin_copy(p, &util::home(), Path::new(DARWIN_USER_FILES))
 }
 
 /// A symlink into the Nix store or into the dotfiles repo (home-manager's
@@ -543,6 +551,20 @@ fn is_managed_link(p: &Path, dotfiles: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
         && (std::fs::read_link(p).is_ok_and(|t| t.starts_with("/nix/store"))
             || std::fs::canonicalize(p).is_ok_and(|t| t.starts_with(dotfiles)))
+}
+
+/// A regular file identical to nix-darwin's copy of it. nix-darwin copies
+/// user launch agents into the home folder instead of linking them; a copy
+/// edited by hand no longer counts.
+fn is_darwin_copy(p: &Path, home: &Path, darwin_user: &Path) -> bool {
+    let Ok(rel) = p.strip_prefix(home) else {
+        return false;
+    };
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file())
+        && match (std::fs::read(p), std::fs::read(darwin_user.join(rel))) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
 }
 
 /// Counts managed links under `dir` (a few levels deep) and collects the
@@ -559,7 +581,7 @@ fn scan_folder(dir: &Path, rel: &Path, dotfiles: &Path, depth: usize, unmanaged:
         }
         let p = e.path();
         let r = rel.join(&name);
-        if is_managed_link(&p, dotfiles) {
+        if is_managed(&p, dotfiles) {
             managed += 1;
         } else if depth < 3 && std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) {
             managed += scan_folder(&p, &r, dotfiles, depth + 1, unmanaged);
@@ -650,6 +672,32 @@ mod tests {
         let hidden = dir_section(tmp.join("watched").to_str().unwrap(), true, &tmp.join("dotfiles"));
         assert_eq!(hidden.items.keys().collect::<Vec<_>>(), [".hidden"]);
         assert!(!dir_section(tmp.join("nope").to_str().unwrap(), false, &tmp).available);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn darwin_copies() {
+        let tmp = std::env::temp_dir().join(format!("dotfinder-darwin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (home, sys) = (tmp.join("home"), tmp.join("system-user"));
+        let agents = Path::new("Library/LaunchAgents");
+        std::fs::create_dir_all(home.join(agents)).unwrap();
+        std::fs::create_dir_all(sys.join(agents)).unwrap();
+        // The system generation links to the store; the home copy is a real file.
+        std::fs::write(tmp.join("store.plist"), "<plist/>").unwrap();
+        std::os::unix::fs::symlink(tmp.join("store.plist"), sys.join(agents).join("a.plist")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("store.plist"), sys.join(agents).join("b.plist")).unwrap();
+        std::fs::write(home.join(agents).join("a.plist"), "<plist/>").unwrap();
+        std::fs::write(home.join(agents).join("b.plist"), "<plist>edited</plist>").unwrap();
+        std::fs::write(home.join(agents).join("c.plist"), "<plist/>").unwrap();
+        let copy = |name: &str| is_darwin_copy(&home.join(agents).join(name), &home, &sys);
+        assert!(copy("a.plist"));
+        assert!(!copy("b.plist"), "edited by hand");
+        assert!(!copy("c.plist"), "not from nix-darwin");
+        assert!(
+            !is_darwin_copy(&tmp.join("store.plist"), &home, &sys),
+            "outside home"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
