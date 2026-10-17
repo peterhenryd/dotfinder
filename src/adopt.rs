@@ -253,6 +253,10 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                         .into(),
                 );
             }
+            ("cmd:uv-tool", Kind::Added, None) => {
+                note = Some("Switches install it with `uv tool install` when it's missing, and `dotfinder upgrade` keeps it current.".into());
+                options.push(('a', "add it to the config"));
+            }
             ("cmd:rustup-toolchain", Kind::Added, None) => {
                 note = Some("Toolchains are managed by rustup; a rust-toolchain.toml in each project pins the version it needs.".into());
             }
@@ -288,6 +292,10 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                 }
                 ("defaults", Some(k)) => {
                     adopted.set_default(&c.item, k, value.unwrap().clone());
+                    n_adopted += 1;
+                }
+                ("cmd:uv-tool", None) => {
+                    adopted.uv_tools.push(c.item.clone());
                     n_adopted += 1;
                 }
                 ("defaults", None) => {

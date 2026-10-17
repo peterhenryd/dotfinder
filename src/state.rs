@@ -141,18 +141,22 @@ impl IgnoredFile {
 }
 
 /// `dotfinder/adopted.json` in the dotfiles repo, read by the dotfiles Nix
-/// module: `{"casks": [], "brews": [], "masApps": {name: id},
+/// module: `{"casks": [], "brews": [], "uvTools": [], "masApps": {name: id},
 /// "manualApps": [], "renames": {cask: {"from": app, "to": app}},
 /// "defaults": {domain: {key: value}}}`.
+/// `uvTools` are Python command-line tools that switches install with
+/// `uv tool install` when they're missing.
 /// `masApps` and `manualApps` are apps the config doesn't install, listed so
 /// a new Mac's audit names them (App Store apps with a link to their page).
 /// They stay out of Homebrew: once a Brewfile lists any App Store app,
 /// Homebrew's cleanup uninstalls every App Store app it doesn't list. `renames` are cask apps kept under a name of your own; the
 /// switch renames them after Homebrew installs them.
+#[derive(Default)]
 pub struct AdoptedFile {
     path: PathBuf,
     pub casks: Vec<String>,
     pub brews: Vec<String>,
+    pub uv_tools: Vec<String>,
     pub mas_apps: BTreeMap<String, i64>,
     pub manual_apps: Vec<String>,
     pub renames: BTreeMap<String, Rename>,
@@ -180,6 +184,7 @@ impl AdoptedFile {
         Ok(AdoptedFile {
             casks: list("casks"),
             brews: list("brews"),
+            uv_tools: list("uvTools"),
             mas_apps: v
                 .get("masApps")
                 .and_then(Value::as_obj)
@@ -234,6 +239,8 @@ impl AdoptedFile {
         self.casks.dedup();
         self.brews.sort();
         self.brews.dedup();
+        self.uv_tools.sort();
+        self.uv_tools.dedup();
         self.manual_apps.sort();
         self.manual_apps.dedup();
         let mut o = BTreeMap::new();
@@ -244,6 +251,10 @@ impl AdoptedFile {
         o.insert(
             "brews".into(),
             Value::Arr(self.brews.iter().cloned().map(Value::Str).collect()),
+        );
+        o.insert(
+            "uvTools".into(),
+            Value::Arr(self.uv_tools.iter().cloned().map(Value::Str).collect()),
         );
         o.insert(
             "masApps".into(),

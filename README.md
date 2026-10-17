@@ -31,7 +31,7 @@ matches the config. Anything that differs later is drift.
 | Command | What it does |
 | --- | --- |
 | `dotfinder rebuild` | Warns about Homebrew packages the switch would uninstall, runs `darwin-rebuild switch`, then records a new baseline |
-| `dotfinder upgrade` | Runs `brew upgrade` with renamed apps under their Homebrew names for the duration, then records a new baseline |
+| `dotfinder upgrade` | Runs `brew upgrade` with renamed apps under their Homebrew names for the duration, then `uv tool upgrade --all`, then records a new baseline |
 | `dotfinder drift` | What changed since the baseline |
 | `dotfinder audit` | Everything the config doesn't capture, changed recently or not |
 | `dotfinder adopt` | Walks through drift one change at a time: add it to the config, or ignore it from then on, publicly or privately |
@@ -49,10 +49,11 @@ matches the config. Anything that differs later is drift.
 `adopt` never edits hand-written Nix. It writes two JSON files into the
 dotfiles repo:
 
-- `dotfinder/adopted.json`: casks, formulae, renamed cask apps (`renames`),
-  preferences, and apps the config doesn't install: App Store apps
-  (`masApps`, by store ID) and apps to install by hand (`manualApps`). A
-  small Nix module reads it into `homebrew.casks`, `homebrew.brews` and
+- `dotfinder/adopted.json`: casks, formulae, Python tools installed with uv
+  (`uvTools`), renamed cask apps (`renames`), preferences, and apps the
+  config doesn't install: App Store apps (`masApps`, by store ID) and apps
+  to install by hand (`manualApps`). A small Nix module reads it into
+  `homebrew.casks`, `homebrew.brews` and
   `system.defaults.CustomUserPreferences`, and applies the renames.
 - `dotfinder/ignored.json`: ignore rules.
 
@@ -80,12 +81,45 @@ in
 }
 ```
 
+For `uvTools`, the module also needs a step that installs missing tools;
+see [Python tools](#python-tools).
+
 `adopt` refuses preferences that hold dates or binary data (nix-darwin can't
 write them) and anything that looks like a secret.
 
 Ignoring something privately (`p` in `adopt`) writes the rule to
 `~/.local/share/dotfinder/ignored.json` instead, outside the repo, so the
 name of what it hides isn't published. Back that file up with the vault.
+
+## Python tools
+
+Some Python command-line tools move faster than nixpkgs, or aren't in it
+(mlx-lm, for one). For a tool installed with `uv tool install`, `adopt`
+offers to add it to `uvTools`. Entries take what `uv tool install` takes,
+extras and versions included (`"mlx-lm[train]>=0.20"`), and `audit` stops
+naming listed tools and the commands uv links into `~/.local/bin`. A
+home-manager activation step installs the missing ones on each switch:
+
+```nix
+home-manager.users.${config.system.primaryUser} =
+  { lib, pkgs, ... }:
+  {
+    home.activation.uvTools = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      uvInstalled=" $(${pkgs.uv}/bin/uv tool list 2>/dev/null | while read -r name _; do
+        case "$name" in -* | "") ;; *) printf '%s ' "$name" ;; esac
+      done)"
+      for spec in ${lib.escapeShellArgs (adopted.uvTools or [ ])}; do
+        name="''${spec%%[][=<>~!@; ]*}"
+        case "$uvInstalled" in
+          *" $name "*) ;;
+          *) run ${pkgs.uv}/bin/uv tool install "$spec" || echo "uv couldn't install $spec" >&2 ;;
+        esac
+      done
+    '';
+  };
+```
+
+A tool taken off the list stays installed until `uv tool uninstall`.
 
 ## Apps
 

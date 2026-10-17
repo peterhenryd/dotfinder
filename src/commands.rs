@@ -129,10 +129,8 @@ pub fn audit_list(cfg: &Config, show_all: bool) -> Result<(Vec<Change>, usize, O
         .filter(|w| !w.audit)
         .map(|w| format!("dir:{}", w.path))
         .collect();
-    let (known_apps, renamed) = AdoptedFile::load(cfg)
-        .map(|a| (a.known_app_names(), a.renames.keys().cloned().collect::<Vec<_>>()))
-        .unwrap_or_default();
-    let all = audit_findings(&now, declared.as_ref(), &skip, &known_apps, &renamed);
+    let adopted = AdoptedFile::load(cfg).unwrap_or_default();
+    let all = audit_findings(&now, declared.as_ref(), &skip, &adopted);
     let total = all.len();
     let shown: Vec<Change> = all
         .into_iter()
@@ -531,6 +529,17 @@ pub fn upgrade(cfg: &Config, extra: &[String]) -> Result<(), String> {
     crate::rename::apply(&renames);
     if !status?.success() {
         return Err("brew upgrade failed; the baseline wasn't updated".into());
+    }
+    // Python tools installed with uv update separately.
+    if util::run_simple(&["uv", "--version"]).is_ok_and(|o| o.ok()) {
+        println!("\n{}", bold("Upgrading uv tools:"));
+        let ok = std::process::Command::new("uv")
+            .args(["tool", "upgrade", "--all"])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            warn("`uv tool upgrade --all` failed");
+        }
     }
     println!();
     baseline(cfg)

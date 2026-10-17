@@ -635,10 +635,15 @@ fn is_managed(p: &Path, dotfiles: &Path) -> bool {
 }
 
 /// A symlink into the Nix store or into the dotfiles repo (home-manager's
-/// out-of-store links go through the store first).
+/// out-of-store links go through the store first), or one of the command
+/// links `uv tool install` makes, which the uv tools list covers.
 fn is_managed_link(p: &Path, dotfiles: &Path) -> bool {
+    let uv_tools = match std::env::var_os("XDG_DATA_HOME") {
+        Some(d) if !d.is_empty() => PathBuf::from(d).join("uv/tools"),
+        _ => util::home().join(".local/share/uv/tools"),
+    };
     std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
-        && (std::fs::read_link(p).is_ok_and(|t| t.starts_with("/nix/store"))
+        && (std::fs::read_link(p).is_ok_and(|t| t.starts_with("/nix/store") || t.starts_with(&uv_tools))
             || std::fs::canonicalize(p).is_ok_and(|t| t.starts_with(dotfiles)))
 }
 

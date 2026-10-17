@@ -4,6 +4,7 @@ use crate::brew::Brewfile;
 use crate::diff::{Change, Kind};
 use crate::json::Value;
 use crate::snapshot::Snapshot;
+use crate::state::AdoptedFile;
 use crate::term::{bold, clip, cyan, dim, green, red, yellow};
 
 pub fn section_label(section: &str) -> String {
@@ -183,15 +184,22 @@ pub fn print_changes(changes: &[Change], declared: Option<&Brewfile>) {
 /// Everything on the machine that the config doesn't capture, as
 /// "added" changes so `adopt --audit` can walk through them.
 /// `skip_sections`: sections the audit leaves out (folders with `audit: false`).
-/// `known_apps`: app names the config lists without a cask (App Store apps
-/// and apps to install by hand). `renamed`: casks whose rename it records.
+/// The package name in a `uv tool install` argument: "mlx-lm" for
+/// "mlx-lm[train]>=0.20".
+fn uv_tool_name(spec: &str) -> &str {
+    let end = spec.find(|c: char| "[=<>~!@; ".contains(c)).unwrap_or(spec.len());
+    &spec[..end]
+}
+
+/// `adopted`: what dotfinder/adopted.json accounts for beyond Homebrew: App
+/// Store apps and apps to install by hand, recorded renames, uv tools.
 pub fn audit_findings(
     s: &Snapshot,
     declared: Option<&Brewfile>,
     skip_sections: &[String],
-    known_apps: &[String],
-    renamed: &[String],
+    adopted: &AdoptedFile,
 ) -> Vec<Change> {
+    let known_apps = adopted.known_app_names();
     let mut out = Vec::new();
     let add = |out: &mut Vec<Change>, section: &str, item: &str, v: &Value| {
         out.push(Change {
@@ -216,13 +224,16 @@ pub fn audit_findings(
                     let source = v.get("source").and_then(Value::as_str).unwrap_or("");
                     match source.strip_prefix("homebrew:") {
                         // A renamed cask app whose new name the config doesn't record.
-                        Some(token) => v.get("renamed_from").is_some() && !renamed.iter().any(|t| t == token),
+                        Some(token) => {
+                            v.get("renamed_from").is_some() && !adopted.renames.contains_key(token)
+                        }
                         None => {
                             matches!(source, "manual" | "app-store") && !known_apps.iter().any(|k| k == name)
                         }
                     }
                 }
                 n if n.starts_with("dir:") => v.get("managed") == Some(&Value::Bool(false)),
+                "cmd:uv-tool" => !adopted.uv_tools.iter().any(|t| uv_tool_name(t) == item),
                 n if n.starts_with("cmd:") => n != "cmd:login-items" && n != "cmd:rustup-toolchain",
                 _ => false,
             };
@@ -319,12 +330,44 @@ mod tests {
             generation: None,
             sections,
         };
-        let known = ["Things 3".to_string(), "Zed".to_string()];
-        let found: Vec<String> = audit_findings(&s, None, &[], &known, &[])
+        let mut adopted = AdoptedFile::default();
+        adopted.manual_apps.push("Zed".into());
+        adopted.mas_apps.insert("Things 3".into(), 904280696);
+        let found: Vec<String> = audit_findings(&s, None, &[], &adopted)
             .into_iter()
             .map(|c| c.item)
             .collect();
         assert_eq!(found, ["/Applications/Other.app"]);
+    }
+
+    #[test]
+    fn listed_uv_tools_are_not_findings() {
+        let mut items = BTreeMap::new();
+        for t in ["mlx-lm", "mlx-vlm", "ruff"] {
+            items.insert(t.to_string(), Value::Null);
+        }
+        let mut sections = BTreeMap::new();
+        sections.insert(
+            "cmd:uv-tool".to_string(),
+            Section {
+                available: true,
+                note: None,
+                items,
+            },
+        );
+        let s = Snapshot {
+            taken_at: 0,
+            kind: "manual".into(),
+            generation: None,
+            sections,
+        };
+        let mut adopted = AdoptedFile::default();
+        adopted.uv_tools = vec!["mlx-lm".into(), "mlx-vlm[torch]>=0.1".into()];
+        let found: Vec<String> = audit_findings(&s, None, &[], &adopted)
+            .into_iter()
+            .map(|c| c.item)
+            .collect();
+        assert_eq!(found, ["ruff"]);
     }
 
     #[test]
@@ -355,8 +398,15 @@ mod tests {
             generation: None,
             sections,
         };
-        assert_eq!(audit_findings(&s, None, &[], &[], &[]).len(), 1);
-        let recorded = ["macs-fan-control".to_string()];
-        assert!(audit_findings(&s, None, &[], &[], &recorded).is_empty());
+        assert_eq!(audit_findings(&s, None, &[], &AdoptedFile::default()).len(), 1);
+        let mut adopted = AdoptedFile::default();
+        adopted.renames.insert(
+            "macs-fan-control".into(),
+            crate::state::Rename {
+                from: "Macs Fan Control.app".into(),
+                to: "Fan Control.app".into(),
+            },
+        );
+        assert!(audit_findings(&s, None, &[], &adopted).is_empty());
     }
 }
