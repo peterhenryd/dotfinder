@@ -153,11 +153,18 @@ pub fn audit(cfg: &Config, show_all: bool) -> Result<(), String> {
         print_audit(&shown, &|name, id| brew::casks_for_app(name, id));
     }
 
-    let missing = missing_manual_apps(cfg);
+    let missing = missing_listed_apps(cfg);
     if !missing.is_empty() {
         heading("To install by hand");
-        for name in &missing {
-            println!("  {} {name}", yellow("!"));
+        for (name, id) in &missing {
+            match id {
+                Some(id) => println!(
+                    "  {} {name} {}",
+                    yellow("!"),
+                    dim(&format!("macappstore://apps.apple.com/app/id{id}"))
+                ),
+                None => println!("  {} {name}", yellow("!")),
+            }
         }
         println!(
             "  {}",
@@ -204,8 +211,9 @@ pub fn audit(cfg: &Config, show_all: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Apps the config lists as installed by hand that aren't on this Mac.
-fn missing_manual_apps(cfg: &Config) -> Vec<String> {
+/// Apps adopted.json lists that aren't on this Mac: (name, App Store ID if
+/// it's an App Store app).
+fn missing_listed_apps(cfg: &Config) -> Vec<(String, Option<i64>)> {
     let Ok(adopted) = AdoptedFile::load(cfg) else {
         return Vec::new();
     };
@@ -214,12 +222,10 @@ fn missing_manual_apps(cfg: &Config) -> Vec<String> {
         util::sys("/Applications/Utilities"),
         util::expand("~/Applications"),
     ];
-    adopted
-        .manual_apps
-        .iter()
-        .filter(|name| !dirs.iter().any(|d| d.join(format!("{name}.app")).exists()))
-        .cloned()
-        .collect()
+    let present = |name: &str| dirs.iter().any(|d| d.join(format!("{name}.app")).exists());
+    let manual = adopted.manual_apps.iter().map(|n| (n.clone(), None));
+    let store = adopted.mas_apps.iter().map(|(n, id)| (n.clone(), Some(*id)));
+    manual.chain(store).filter(|(n, _)| !present(n)).collect()
 }
 
 /// Before a switch: Homebrew packages installed but not declared, which the
@@ -258,6 +264,37 @@ fn preflight(cfg: &Config) -> Result<bool, String> {
         .collect();
     if !in_the_way(&declared, &casks.stdout)? {
         return Ok(false);
+    }
+    // Once the config lists any App Store app, Homebrew's cleanup uninstalls
+    // every App Store app it doesn't list.
+    let undeclared_store: Vec<(i64, String)> = if declared.mas.is_empty() {
+        Vec::new()
+    } else {
+        brew::mas_list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(id, _)| !declared.mas.contains(id))
+            .collect()
+    };
+    if !undeclared_store.is_empty() {
+        println!(
+            "\n{}",
+            bold("The config lists App Store apps (homebrew.masApps), so the rebuild will uninstall these:")
+        );
+        for (id, name) in &undeclared_store {
+            println!("  {} {name} {}", red("-"), dim(&format!("(App Store {id})")));
+        }
+        println!(
+            "  {}",
+            dim("Add them to homebrew.masApps, or remove homebrew.masApps, to keep them.")
+        );
+        let answer = choose(
+            "\nWhat now?",
+            &[('c', "continue and uninstall them"), ('q', "stop")],
+        );
+        if answer != Some('c') {
+            return Ok(false);
+        }
     }
     if undeclared_brews.is_empty() && undeclared_casks.is_empty() {
         return Ok(true);

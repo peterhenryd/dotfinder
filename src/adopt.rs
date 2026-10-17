@@ -223,7 +223,7 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                         options.push(('c', "use the cask"));
                     }
                     if app_store_id.is_some() {
-                        options.push(('m', "add it from the App Store"));
+                        options.push(('m', "list it as an App Store app"));
                     }
                     options.push(('n', "list it as an app to install by hand"));
                 }
@@ -323,9 +323,7 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                     n_adopted += 1;
                     println!(
                         "  {}",
-                        dim(
-                            "Rebuilds install it with `mas` while you're signed in to the App Store. The copy here stays as it is."
-                        )
+                        dim("On a Mac without it, `dotfinder audit` links to its App Store page.")
                     );
                 }
             }

@@ -47,10 +47,10 @@ matches the config. Anything that differs later is drift.
 `adopt` never edits hand-written Nix. It writes two JSON files into the
 dotfiles repo:
 
-- `dotfinder/adopted.json`: casks, formulae, App Store apps (`masApps`, by
-  store ID), apps to install by hand (`manualApps`, names only), renamed
-  cask apps (`renames`) and preferences. A small Nix module reads it into
-  `homebrew.casks`, `homebrew.brews`, `homebrew.masApps` and
+- `dotfinder/adopted.json`: casks, formulae, renamed cask apps (`renames`),
+  preferences, and apps the config doesn't install: App Store apps
+  (`masApps`, by store ID) and apps to install by hand (`manualApps`). A
+  small Nix module reads it into `homebrew.casks`, `homebrew.brews` and
   `system.defaults.CustomUserPreferences`, and applies the renames.
 - `dotfinder/ignored.json`: ignore rules.
 
@@ -66,8 +66,7 @@ let
 in
 {
   homebrew.casks = adopted.casks or [ ];
-  homebrew.brews = adopted.brews or [ ] ++ lib.optional ((adopted.masApps or { }) != { }) "mas";
-  homebrew.masApps = adopted.masApps or { };
+  homebrew.brews = adopted.brews or [ ];
   system.defaults.CustomUserPreferences = adopted.defaults or { };
   system.activationScripts.postActivation.text = lib.concatStrings (
     lib.mapAttrsToList (cask: r: ''
@@ -93,10 +92,16 @@ For an app installed from the App Store or by hand, `adopt` offers:
 - the Homebrew cask that installs it, when one exists. Quit the app and
   move it to the Trash before the next rebuild, so Homebrew can install its
   own copy; `dotfinder rebuild` stops to say so if one is still in the way.
-- adding it from the App Store, by its store ID. Rebuilds install it with
-  `mas` while you're signed in to the App Store.
+- listing it as an App Store app, by its store ID. On a Mac where it's
+  missing, `audit` names it with a link to its App Store page.
 - listing it as an app to install by hand. `audit` then names it on any Mac
   where it's missing.
+
+App Store apps stay out of Homebrew on purpose: once a Brewfile lists any
+App Store app (`homebrew.masApps`), Homebrew's cleanup uninstalls every
+App Store app it doesn't list. If your config uses `homebrew.masApps`
+anyway, `dotfinder rebuild` lists the App Store apps the switch would
+remove and asks first.
 
 Apps are matched to casks by bundle name first and by bundle ID second, so
 a renamed app is still recognized: casks name the app's bundle ID in their

@@ -12,6 +12,8 @@ pub struct Brewfile {
     pub taps: Vec<String>,
     pub brews: Vec<String>,
     pub casks: Vec<String>,
+    /// App Store app IDs (`mas "Name", id: 123`).
+    pub mas: Vec<i64>,
 }
 
 impl Brewfile {
@@ -29,6 +31,16 @@ impl Brewfile {
                 "tap" => b.taps.push(name.to_string()),
                 "brew" => b.brews.push(name.to_string()),
                 "cask" => b.casks.push(name.to_string()),
+                "mas" => {
+                    if let Some(id) = rest
+                        .split("id:")
+                        .nth(1)
+                        .and_then(|r| r.trim().trim_end_matches(',').split(',').next())
+                        .and_then(|n| n.trim().parse::<i64>().ok())
+                    {
+                        b.mas.push(id);
+                    }
+                }
                 _ => {}
             }
         }
@@ -181,8 +193,7 @@ fn app_stanzas(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// An App Store app's store ID, which `mas` installs it by, from its
-/// Spotlight metadata.
+/// An App Store app's store ID, from its Spotlight metadata.
 pub fn app_store_id(app: &Path) -> Option<i64> {
     let path = app.to_string_lossy();
     let out = run(
@@ -192,6 +203,27 @@ pub fn app_store_id(app: &Path) -> Option<i64> {
     )
     .ok()?;
     out.stdout.trim().parse::<i64>().ok().filter(|id| *id > 0)
+}
+
+/// App Store apps as `mas list` reports them, or None without `mas`.
+pub fn mas_list() -> Option<Vec<(i64, String)>> {
+    let out = run_simple(&["mas", "list"]).ok()?;
+    out.ok().then(|| parse_mas_list(&out.stdout))
+}
+
+fn parse_mas_list(text: &str) -> Vec<(i64, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let (id, rest) = l.split_once(char::is_whitespace)?;
+            let id = id.parse::<i64>().ok()?;
+            let name = match rest.rfind('(') {
+                Some(i) => &rest[..i],
+                None => rest,
+            };
+            Some((id, name.trim().to_string()))
+        })
+        .collect()
 }
 
 fn walk_casks(dir: &Path, f: &mut dyn FnMut(&Path, &str)) {
@@ -221,6 +253,25 @@ fn walk_casks_named(dir: &Path, token: Option<&str>, f: &mut dyn FnMut(&Path, &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brewfile_app_store_entries() {
+        let b = Brewfile::parse("brew \"mas\"\nmas \"AdGuard Mini\", id: 1440147259\n");
+        assert_eq!(b.mas, [1440147259]);
+    }
+
+    /// `mas list` lines: id, name, version.
+    #[test]
+    fn mas_list_lines() {
+        let out = "1440147259  AdGuard Mini            (2.1.0)\n   462058435  Microsoft Word  (16.90)\n";
+        assert_eq!(
+            parse_mas_list(out),
+            [
+                (1440147259, "AdGuard Mini".to_string()),
+                (462058435, "Microsoft Word".to_string())
+            ]
+        );
+    }
 
     #[test]
     fn cask_app_stanzas() {

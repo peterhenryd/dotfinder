@@ -144,8 +144,10 @@ impl IgnoredFile {
 /// module: `{"casks": [], "brews": [], "masApps": {name: id},
 /// "manualApps": [], "renames": {cask: {"from": app, "to": app}},
 /// "defaults": {domain: {key: value}}}`.
-/// `manualApps` are apps nothing can install, listed so a new Mac's audit
-/// names them. `renames` are cask apps kept under a name of your own; the
+/// `masApps` and `manualApps` are apps the config doesn't install, listed so
+/// a new Mac's audit names them (App Store apps with a link to their page).
+/// They stay out of Homebrew: once a Brewfile lists any App Store app,
+/// Homebrew's cleanup uninstalls every App Store app it doesn't list. `renames` are cask apps kept under a name of your own; the
 /// switch renames them after Homebrew installs them.
 pub struct AdoptedFile {
     path: PathBuf,
