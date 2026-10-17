@@ -196,9 +196,8 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                         .and_then(|v| v.get("id"))
                         .and_then(Value::as_str)
                         .unwrap_or("");
-                    app_cask = brew::casks_for_app(&format!("{app_name}.app"), id)
-                        .into_iter()
-                        .next();
+                    let (casks, cask_by_id) = brew::casks_for_app(&format!("{app_name}.app"), id);
+                    app_cask = casks.into_iter().next();
                     if source == "app-store" {
                         app_store_id = brew::app_store_id(&expand(&c.item));
                     }
@@ -215,6 +214,9 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                         app_cask = None;
                     }
                     match &app_cask {
+                        Some(cask) if cask_by_id => lines.push(format!(
+                            "Homebrew probably has it as the cask `{cask}`, matched by bundle ID rather than name; check that before using it."
+                        )),
                         Some(cask) => lines.push(format!("Homebrew has it as the cask `{cask}`.")),
                         None if source == "manual" && lines.is_empty() => {
                             lines.push("Installed by hand, and no cask installs it.".into())

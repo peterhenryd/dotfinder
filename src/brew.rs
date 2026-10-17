@@ -141,26 +141,61 @@ fn tap_casks() -> &'static [(String, String)] {
     })
 }
 
-/// Casks that would install this app: by its bundle name (`Foo.app`), or,
-/// when none installs it under that name (it was renamed), by its bundle
-/// ID, which casks name in their uninstall and zap steps.
-pub fn casks_for_app(app_name: &str, bundle_id: &str) -> Vec<String> {
+/// Casks that would install this app, best match first, and whether they
+/// were found by bundle ID. Casks are looked up by the app's bundle name
+/// (`Foo.app`); when none installs it under that name (it was renamed, or
+/// the cask uses an installer package), by its bundle ID, which casks name
+/// in their uninstall and zap steps. Other casks can name it too, such as a
+/// plugin for it, so matches are ranked.
+pub fn casks_for_app(app_name: &str, bundle_id: &str) -> (Vec<String>, bool) {
     let needle = format!("app \"{app_name}\"");
-    let tokens = |pred: &dyn Fn(&str) -> bool| -> Vec<String> {
-        let mut found: Vec<String> = tap_casks()
+    let display = app_name.trim_end_matches(".app");
+    let found = |pred: &dyn Fn(&str) -> bool| -> Vec<String> {
+        let mut found: Vec<(i32, String)> = tap_casks()
             .iter()
             .filter(|(_, text)| pred(text))
-            .map(|(token, _)| token.clone())
+            .map(|(token, text)| (-rank(token, text, display, bundle_id), token.clone()))
             .collect();
         found.sort();
         found.dedup();
-        found
+        found.into_iter().map(|(_, t)| t).collect()
     };
-    let by_name = tokens(&|text| text.contains(&needle));
+    let by_name = found(&|text| text.contains(&needle));
     if !by_name.is_empty() || bundle_id.is_empty() {
-        return by_name;
+        return (by_name, false);
     }
-    tokens(&|text| crate::snapshot::mentions_id(text, bundle_id))
+    let by_id = found(&|text| crate::snapshot::mentions_id(text, bundle_id));
+    let any = !by_id.is_empty();
+    (by_id, any)
+}
+
+/// How likely a cask is to be the one that installs this app: its name
+/// stanza or token matches the app's name, and it names the bundle ID as the
+/// app's own (its preferences or saved state) rather than inside another
+/// app's folder.
+fn rank(token: &str, text: &str, display: &str, bundle_id: &str) -> i32 {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let mut score = 0;
+    let wanted = format!("name \"{}\"", display.to_lowercase());
+    if text.lines().any(|l| l.trim().to_lowercase() == wanted) {
+        score += 4;
+    }
+    if norm(token) == norm(display) {
+        score += 4;
+    }
+    if !bundle_id.is_empty()
+        && [".plist", ".savedState", "\"", "*"]
+            .iter()
+            .any(|end| text.contains(&format!("{bundle_id}{end}")))
+    {
+        score += 2;
+    }
+    score
 }
 
 /// The apps a cask installs, as paths relative to /Applications, read from
@@ -271,6 +306,18 @@ mod tests {
                 (462058435, "Microsoft Word".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn ranks_the_apps_own_cask_first() {
+        let word = "cask \"microsoft-word\" do\n  name \"Microsoft Word\"\n  pkg \"Microsoft_Word_Installer.pkg\"\n  zap trash: [\n    \"~/Library/Containers/com.microsoft.Word*\",\n    \"~/Library/Preferences/com.microsoft.Word.plist\",\n  ]\nend\n";
+        let bookends = "cask \"bookends\" do\n  name \"Bookends\"\n  app \"Bookends.app\"\n  zap trash: \"~/Library/Application Scripts/com.microsoft.Word/Bookends.scpt\"\nend\n";
+        let id = "com.microsoft.Word";
+        assert!(
+            rank("microsoft-word", word, "Microsoft Word", id)
+                > rank("bookends", bookends, "Microsoft Word", id)
+        );
+        assert_eq!(rank("bookends", bookends, "Microsoft Word", id), 0);
     }
 
     #[test]

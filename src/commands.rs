@@ -150,7 +150,7 @@ pub fn audit(cfg: &Config, show_all: bool) -> Result<(), String> {
             green("Everything found is captured by the config or ignored.")
         );
     } else {
-        print_audit(&shown, &|name, id| brew::casks_for_app(name, id));
+        print_audit(&shown, &|name, id| brew::casks_for_app(name, id).0);
     }
 
     let missing = missing_listed_apps(cfg);
