@@ -53,6 +53,20 @@ pub fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// Reads one line of input after `prompt`. `None` on end of input.
+pub fn ask_line(prompt: &str) -> Option<String> {
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    match std::io::stdin().lock().read_line(&mut line) {
+        Ok(0) | Err(_) => {
+            println!();
+            None
+        }
+        Ok(_) => Some(line.trim().to_string()),
+    }
+}
+
 /// Asks for one of the given single-letter choices. Returns the chosen
 /// letter, or `None` on end of input.
 pub fn choose(prompt: &str, choices: &[(char, &str)]) -> Option<char> {

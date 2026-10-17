@@ -6,7 +6,7 @@ use crate::diff::{Change, diff};
 use crate::report::{audit_findings, print_audit, print_changes};
 use crate::snapshot::{Snapshot, current_generation};
 use crate::state::{self, AdoptedFile, latest_baseline};
-use crate::term::{bold, choose, dim, green, heading, red, warn, yellow};
+use crate::term::{ask_line, bold, choose, dim, green, heading, red, warn, yellow};
 use crate::util::{self, tilde};
 
 pub fn baseline(cfg: &Config) -> Result<(), String> {
@@ -411,7 +411,24 @@ pub fn rebuild(cfg: &Config, extra: &[String]) -> Result<(), String> {
     // covers configs without it.
     crate::rename::apply(&AdoptedFile::load(cfg)?.renames);
     println!();
-    baseline(cfg)
+    baseline(cfg)?;
+    remind_to_push(cfg);
+    Ok(())
+}
+
+/// After a rebuild: a nudge when the dotfiles repo has uncommitted changes.
+fn remind_to_push(cfg: &Config) {
+    let dir = cfg.dotfiles.display().to_string();
+    if let Ok(o) = util::run_simple(&["git", "-C", &dir, "status", "--porcelain"])
+        && o.ok()
+        && !o.stdout.trim().is_empty()
+    {
+        println!(
+            "\n{} has uncommitted changes; {} saves them.",
+            tilde(&cfg.dotfiles),
+            bold("dotfinder push")
+        );
+    }
 }
 
 /// `brew upgrade`, with renamed apps under their Homebrew names while it runs.
@@ -438,4 +455,87 @@ pub fn upgrade(cfg: &Config, extra: &[String]) -> Result<(), String> {
     }
     println!();
     baseline(cfg)
+}
+
+/// `dotfinder push`: commits everything changed in the dotfiles repo, with a
+/// message you type, and pushes it. Also pushes commits made earlier.
+pub fn push(cfg: &Config) -> Result<(), String> {
+    let dir = cfg.dotfiles.display().to_string();
+    let git = |args: &[&str]| -> Result<util::Output, String> {
+        let mut argv = vec!["git", "-C", &dir];
+        argv.extend_from_slice(args);
+        util::run_simple(&argv).map_err(|e| format!("git: {e}"))
+    };
+    // Runs git with the terminal attached, so hooks and credential prompts
+    // show their output.
+    let git_live = |args: &[&str]| -> Result<bool, String> {
+        std::process::Command::new("git")
+            .args(["-C", &dir])
+            .args(args)
+            .status()
+            .map(|s| s.success())
+            .map_err(|e| format!("git: {e}"))
+    };
+
+    let status = git(&["status", "--porcelain"])?;
+    if !status.ok() {
+        return Err(format!(
+            "{} isn't a git repo: {}",
+            tilde(&cfg.dotfiles),
+            status.stderr.trim()
+        ));
+    }
+    let changes: Vec<&str> = status.stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    let unpushed = |git: &dyn Fn(&[&str]) -> Result<util::Output, String>| -> usize {
+        git(&["rev-list", "--count", "@{upstream}..HEAD"])
+            .ok()
+            .filter(|o| o.ok())
+            .and_then(|o| o.stdout.trim().parse().ok())
+            .unwrap_or(0)
+    };
+
+    if changes.is_empty() && unpushed(&git) == 0 {
+        println!("{}", green("Nothing to commit or push."));
+        return Ok(());
+    }
+
+    if !changes.is_empty() {
+        heading(&format!("Changes in {}", tilde(&cfg.dotfiles)));
+        for line in &changes {
+            let (code, path) = line.split_at(line.len().min(3));
+            let mark = match code.trim() {
+                "??" | "A" => green("+"),
+                "D" => red("-"),
+                _ => yellow("~"),
+            };
+            println!("  {mark} {path}");
+        }
+        let Some(message) = ask_line("\nCommit message (empty to cancel): ") else {
+            return Ok(());
+        };
+        if message.is_empty() {
+            println!("Nothing committed.");
+            return Ok(());
+        }
+        if !git_live(&["add", "-A"])? {
+            return Err("git add failed".into());
+        }
+        if !git_live(&["commit", "-q", "-m", &message])? {
+            return Err(
+                "the commit failed; nothing was pushed (the pre-commit hook refuses key material)".into(),
+            );
+        }
+    }
+
+    let n = unpushed(&git);
+    println!(
+        "\n{} {n} commit{}",
+        bold("Pushing"),
+        if n == 1 { "" } else { "s" }
+    );
+    if !git_live(&["push", "-q"])? {
+        return Err("git push failed; the commit is saved locally, so `dotfinder push` again retries".into());
+    }
+    println!("{}", green("Pushed."));
+    Ok(())
 }

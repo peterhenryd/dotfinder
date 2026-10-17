@@ -378,15 +378,12 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
     }
     if n_adopted > 0 {
         println!(
-            "Apply them with {}. Then commit {} in your dotfiles repo.",
+            "Apply them with {}, then save them with {}.",
             bold("dotfinder rebuild"),
-            bold("dotfinder/")
+            bold("dotfinder push")
         );
     } else if n_ignored > 0 {
-        println!(
-            "Commit {} in your dotfiles repo to keep the ignore rules.",
-            bold("dotfinder/")
-        );
+        println!("Save the ignore rules with {}.", bold("dotfinder push"));
     }
     Ok(())
 }

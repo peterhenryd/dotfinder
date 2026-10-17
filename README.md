@@ -36,6 +36,7 @@ matches the config. Anything that differs later is drift.
 | `dotfinder audit` | Everything the config doesn't capture, changed recently or not |
 | `dotfinder adopt` | Walks through drift one change at a time: add it to the config, or ignore it from then on, publicly or privately |
 | `dotfinder adopt --audit` | The same, for audit findings |
+| `dotfinder push` | Shows what changed in the dotfiles repo, asks for a commit message, commits everything and pushes |
 | `dotfinder baseline` | Records the current state as the baseline |
 | `dotfinder vault status / backup / restore` | Keeps the configured private files in the vault |
 | `dotfinder snapshot` | Prints the current state as JSON |

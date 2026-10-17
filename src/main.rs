@@ -36,6 +36,8 @@ Commands:
   adopt [--audit]  Go through drift (or audit findings) one at a time: add
                    each to the config, keep a rename, or ignore it from then
                    on, publicly or privately.
+  push             Commit what changed in the dotfiles repo, with a message
+                   you type, and push it.
   baseline         Record the current state as the baseline.
   vault status     Which private files are backed up in the vault.
   vault backup     Copy the configured private files into the vault.
@@ -71,6 +73,7 @@ fn main() {
         "drift" => commands::drift(&cfg, flag("--all")),
         "audit" => commands::audit(&cfg, flag("--all")),
         "baseline" => commands::baseline(&cfg),
+        "push" => commands::push(&cfg),
         "snapshot" => commands::snapshot(&cfg),
         "adopt" => {
             if flag("--audit") {
