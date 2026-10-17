@@ -274,7 +274,7 @@ fn preflight(cfg: &Config) -> Result<bool, String> {
         .filter(|n| !n.is_empty() && !declared.declares_cask(n))
         .map(str::to_string)
         .collect();
-    if !in_the_way(&declared, &casks.stdout)? {
+    if !in_the_way(cfg, &declared, &casks.stdout)? {
         return Ok(false);
     }
     // Once the config lists any App Store app, Homebrew's cleanup uninstalls
@@ -354,21 +354,88 @@ fn preflight(cfg: &Config) -> Result<bool, String> {
     }
 }
 
-/// Declared casks that aren't installed yet but whose app already is, from
-/// the App Store or by hand. Homebrew won't install over those, so the
-/// switch would stop at them. Returns false to abort.
-fn in_the_way(declared: &Brewfile, installed_casks: &str) -> Result<bool, String> {
+/// Declared casks that aren't installed yet and would stop the switch:
+/// ones Homebrew has disabled, and ones whose app is already installed some
+/// other way (from the App Store or by hand), which Homebrew won't install
+/// over. Casks that install with a .pkg installer replace an existing copy
+/// themselves. Returns false to abort.
+fn in_the_way(cfg: &Config, declared: &Brewfile, installed_casks: &str) -> Result<bool, String> {
     let installed: Vec<&str> = installed_casks.lines().map(str::trim).collect();
-    let blocked: Vec<(String, String)> = declared
+    let pending: Vec<(String, brew::CaskInfo)> = declared
         .casks
         .iter()
         .filter(|c| !installed.contains(&brew::short(c)))
-        .flat_map(|c| {
-            brew::apps_of_cask(c)
-                .into_iter()
+        .map(|c| (brew::short(c).to_string(), brew::cask_info(c)))
+        .collect();
+    let disabled: Vec<(&str, &str)> = pending
+        .iter()
+        .filter_map(|(c, info)| info.disabled.as_deref().map(|why| (c.as_str(), why)))
+        .collect();
+    let blocked: Vec<(&str, &String)> = pending
+        .iter()
+        .flat_map(|(c, info)| {
+            info.apps
+                .iter()
                 .filter(|app| util::sys("/Applications").join(app).exists())
-                .map(move |app| (brew::short(c).to_string(), app))
+                .map(move |app| (c.as_str(), app))
         })
+        .collect();
+
+    if !disabled.is_empty() {
+        println!(
+            "\n{}",
+            bold("Homebrew has disabled these casks, so installing them would fail the switch:")
+        );
+        for (cask, why) in &disabled {
+            println!("  {} {cask} {}", red("!"), dim(&format!("({why})")));
+        }
+        let mut adopted = AdoptedFile::load(cfg)?;
+        let removable: Vec<&str> = disabled
+            .iter()
+            .map(|(c, _)| *c)
+            .filter(|c| adopted.casks.iter().any(|a| brew::short(a) == *c))
+            .collect();
+        let mut options = vec![('q', "stop")];
+        if removable.len() == disabled.len() {
+            println!(
+                "  {}",
+                dim("They were added with `adopt`. List them as apps to install by hand instead?")
+            );
+            options.insert(0, ('m', "move them to the apps to install by hand, and continue"));
+        } else {
+            println!(
+                "  {}",
+                dim(
+                    "Remove them from modules/darwin/homebrew.nix (or dotfinder/adopted.json), then rebuild."
+                )
+            );
+        }
+        match choose("\nWhat now?", &options) {
+            Some('m') => {
+                for cask in &removable {
+                    adopted.casks.retain(|a| brew::short(a) != *cask);
+                    if let Some((_, info)) = pending.iter().find(|(c, _)| c == cask) {
+                        for app in &info.apps {
+                            adopted.manual_apps.push(
+                                app.rsplit('/')
+                                    .next()
+                                    .unwrap_or(app)
+                                    .trim_end_matches(".app")
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                adopted.save().map_err(|e| e.to_string())?;
+                println!("{} {}", green("Updated"), tilde(&cfg.adopted_path()));
+            }
+            _ => return Ok(false),
+        }
+    }
+
+    let blocked: Vec<(&str, &String)> = blocked
+        .into_iter()
+        .filter(|(c, _)| !disabled.iter().any(|(d, _)| d == c))
         .collect();
     if blocked.is_empty() {
         return Ok(true);

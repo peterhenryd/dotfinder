@@ -153,7 +153,7 @@ pub fn casks_for_app(app_name: &str, bundle_id: &str) -> (Vec<String>, bool) {
     let found = |pred: &dyn Fn(&str) -> bool| -> Vec<String> {
         let mut found: Vec<(i32, String)> = tap_casks()
             .iter()
-            .filter(|(_, text)| pred(text))
+            .filter(|(_, text)| pred(text) && disabled_reason(text).is_none())
             .map(|(token, text)| (-rank(token, text, display, bundle_id), token.clone()))
             .collect();
         found.sort();
@@ -198,17 +198,49 @@ fn rank(token: &str, text: &str, display: &str, bundle_id: &str) -> i32 {
     score
 }
 
-/// The apps a cask installs, as paths relative to /Applications, read from
-/// its definition in the local taps (the `target:` path when it has one).
-pub fn apps_of_cask(token: &str) -> Vec<String> {
-    let mut apps = Vec::new();
+/// What a cask's definition in the local taps says: the apps it installs,
+/// as paths relative to /Applications (the `target:` path when it has one),
+/// and why Homebrew refuses to install it, if it does.
+#[derive(Default)]
+pub struct CaskInfo {
+    pub apps: Vec<String>,
+    pub disabled: Option<String>,
+}
+
+pub fn cask_info(token: &str) -> CaskInfo {
+    let mut info = CaskInfo::default();
     let taps = crate::util::sys("/opt/homebrew/Library/Taps");
     walk_casks_named(&taps, Some(short(token)), &mut |_, text| {
-        apps.extend(app_stanzas(text));
+        info.apps.extend(app_stanzas(text));
+        info.disabled = info.disabled.take().or_else(|| disabled_reason(text));
     });
-    apps.sort();
-    apps.dedup();
-    apps
+    info.apps.sort();
+    info.apps.dedup();
+    info
+}
+
+/// Why a cask is disabled (`disable! ... because: ...`), in words; None when
+/// it isn't. Homebrew refuses to install a disabled cask, which fails the
+/// whole `brew bundle` and with it the switch.
+fn disabled_reason(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| l.starts_with("disable!"))?;
+    let because = line.split("because:").nth(1).map(str::trim).unwrap_or("");
+    let reason = if let Some(sym) = because.strip_prefix(':') {
+        match sym.trim_end_matches(',') {
+            "fails_gatekeeper_check" => "it doesn't pass macOS's Gatekeeper check".to_string(),
+            "discontinued" => "it's discontinued".to_string(),
+            "no_longer_available" => "it's no longer available".to_string(),
+            "unmaintained" => "it's unmaintained".to_string(),
+            other => other.replace('_', " "),
+        }
+    } else {
+        because.trim_matches(|c| c == '"' || c == ',').to_string()
+    };
+    Some(if reason.is_empty() {
+        "Homebrew disabled it".into()
+    } else {
+        reason
+    })
 }
 
 /// `app "X.app"` and `app "X.app", target: "Y.app"` lines in a cask file.
@@ -318,6 +350,21 @@ mod tests {
                 > rank("bookends", bookends, "Microsoft Word", id)
         );
         assert_eq!(rank("bookends", bookends, "Microsoft Word", id), 0);
+    }
+
+    #[test]
+    fn disabled_casks() {
+        let text = "cask \"openemu\" do\n  app \"OpenEmu.app\"\n  disable! date: \"2026-09-01\", because: :fails_gatekeeper_check\nend\n";
+        assert_eq!(
+            disabled_reason(text).as_deref(),
+            Some("it doesn't pass macOS's Gatekeeper check")
+        );
+        assert_eq!(disabled_reason("cask \"ok\" do\nend\n"), None);
+        assert_eq!(
+            disabled_reason("  disable! date: \"2026-01-01\", because: \"the vendor pulled it\"\n")
+                .as_deref(),
+            Some("the vendor pulled it")
+        );
     }
 
     #[test]
