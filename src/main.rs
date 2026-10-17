@@ -8,6 +8,7 @@ mod config;
 mod diff;
 mod json;
 mod plist;
+mod rename;
 mod report;
 mod snapshot;
 mod state;
@@ -26,11 +27,15 @@ Commands:
   rebuild [args]   Check for Homebrew packages a switch would uninstall,
                    run `darwin-rebuild switch`, then record a new baseline.
                    Extra args go to darwin-rebuild.
+  upgrade [args]   Run `brew upgrade`, giving renamed apps their Homebrew
+                   names for the duration, then record a new baseline.
+                   Extra args go to brew upgrade.
   drift [--all]    What changed since the last baseline.
   audit [--all]    Everything on the Mac the config doesn't capture, changed
                    recently or not.
   adopt [--audit]  Go through drift (or audit findings) one at a time: add
-                   each to the config or ignore it from then on.
+                   each to the config, keep a rename, or ignore it from then
+                   on, publicly or privately.
   baseline         Record the current state as the baseline.
   vault status     Which private files are backed up in the vault.
   vault backup     Copy the configured private files into the vault.
@@ -62,6 +67,7 @@ fn main() {
 
     let result = match cmd {
         "rebuild" => commands::rebuild(&cfg, &args[1..]),
+        "upgrade" => commands::upgrade(&cfg, &args[1..]),
         "drift" => commands::drift(&cfg, flag("--all")),
         "audit" => commands::audit(&cfg, flag("--all")),
         "baseline" => commands::baseline(&cfg),

@@ -61,10 +61,14 @@ fn item_detail(section: &str, v: &Value) -> String {
             "app-store" => "App Store".into(),
             "apple" => "Apple".into(),
             "nix" => "Nix".into(),
-            s => s
-                .strip_prefix("homebrew:")
-                .map(|t| format!("Homebrew cask {t}"))
-                .unwrap_or_else(|| s.into()),
+            s => match (
+                s.strip_prefix("homebrew:"),
+                v.get("renamed_from").and_then(Value::as_str),
+            ) {
+                (Some(t), Some(from)) => format!("Homebrew cask {t}, renamed from {from}"),
+                (Some(t), None) => format!("Homebrew cask {t}"),
+                _ => s.into(),
+            },
         };
     }
     if section.starts_with("dir:") {
@@ -178,12 +182,13 @@ pub fn print_changes(changes: &[Change], declared: Option<&Brewfile>) {
 /// "added" changes so `adopt --audit` can walk through them.
 /// `skip_sections`: sections the audit leaves out (folders with `audit: false`).
 /// `known_apps`: app names the config lists without a cask (App Store apps
-/// and apps to install by hand).
+/// and apps to install by hand). `renamed`: casks whose rename it records.
 pub fn audit_findings(
     s: &Snapshot,
     declared: Option<&Brewfile>,
     skip_sections: &[String],
     known_apps: &[String],
+    renamed: &[String],
 ) -> Vec<Change> {
     let mut out = Vec::new();
     let add = |out: &mut Vec<Change>, section: &str, item: &str, v: &Value| {
@@ -206,10 +211,14 @@ pub fn audit_findings(
                 "homebrew-formulae" => declared.is_some_and(|bf| !bf.declares_brew(item)),
                 "apps" => {
                     let name = item.rsplit('/').next().unwrap_or(item).trim_end_matches(".app");
-                    matches!(
-                        v.get("source").and_then(Value::as_str),
-                        Some("manual" | "app-store")
-                    ) && !known_apps.iter().any(|k| k == name)
+                    let source = v.get("source").and_then(Value::as_str).unwrap_or("");
+                    match source.strip_prefix("homebrew:") {
+                        // A renamed cask app whose new name the config doesn't record.
+                        Some(token) => v.get("renamed_from").is_some() && !renamed.iter().any(|t| t == token),
+                        None => {
+                            matches!(source, "manual" | "app-store") && !known_apps.iter().any(|k| k == name)
+                        }
+                    }
                 }
                 n if n.starts_with("dir:") => v.get("managed") == Some(&Value::Bool(false)),
                 n if n.starts_with("cmd:") => n != "cmd:login-items" && n != "cmd:rustup-toolchain",
@@ -228,14 +237,14 @@ pub fn audit_intro(section: &str) -> Option<&'static str> {
         "homebrew-casks" | "homebrew-formulae" => {
             "Not declared in the config; the next rebuild uninstalls these:"
         }
-        "apps" => "Not managed by Homebrew or Nix:",
+        "apps" => "Not managed by Homebrew or Nix, or renamed without the config knowing:",
         s if s.starts_with("dir:") => "Not managed by the config (and not backed up by it):",
         s if s.starts_with("cmd:") => "Installed outside the config:",
         _ => return None,
     })
 }
 
-pub fn print_audit(findings: &[Change], cask_hint: &dyn Fn(&str) -> Vec<String>) {
+pub fn print_audit(findings: &[Change], cask_hint: &dyn Fn(&str, &str) -> Vec<String>) {
     let mut sorted: Vec<&Change> = findings.iter().collect();
     sorted.sort_by_key(|a| section_rank(&a.section));
     let mut current = String::new();
@@ -258,7 +267,13 @@ pub fn print_audit(findings: &[Change], cask_hint: &dyn Fn(&str) -> Vec<String>)
             )
         {
             let name = c.item.rsplit('/').next().unwrap_or(&c.item);
-            let casks = cask_hint(name);
+            let id = c
+                .new
+                .as_ref()
+                .and_then(|v| v.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let casks = cask_hint(name, id);
             if !casks.is_empty() {
                 println!(
                     "      {}",
@@ -303,10 +318,43 @@ mod tests {
             sections,
         };
         let known = ["Things 3".to_string(), "Zed".to_string()];
-        let found: Vec<String> = audit_findings(&s, None, &[], &known)
+        let found: Vec<String> = audit_findings(&s, None, &[], &known, &[])
             .into_iter()
             .map(|c| c.item)
             .collect();
         assert_eq!(found, ["/Applications/Other.app"]);
+    }
+
+    #[test]
+    fn unrecorded_renames_are_findings() {
+        let mut fan = BTreeMap::new();
+        fan.insert(
+            "source".to_string(),
+            Value::Str("homebrew:macs-fan-control".into()),
+        );
+        fan.insert(
+            "renamed_from".to_string(),
+            Value::Str("Macs Fan Control.app".into()),
+        );
+        let mut items = BTreeMap::new();
+        items.insert("/Applications/Fan Control.app".to_string(), Value::Obj(fan));
+        let mut sections = BTreeMap::new();
+        sections.insert(
+            "apps".to_string(),
+            Section {
+                available: true,
+                note: None,
+                items,
+            },
+        );
+        let s = Snapshot {
+            taken_at: 0,
+            kind: "manual".into(),
+            generation: None,
+            sections,
+        };
+        assert_eq!(audit_findings(&s, None, &[], &[], &[]).len(), 1);
+        let recorded = ["macs-fan-control".to_string()];
+        assert!(audit_findings(&s, None, &[], &[], &recorded).is_empty());
     }
 }

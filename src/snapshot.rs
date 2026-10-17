@@ -79,12 +79,12 @@ impl Snapshot {
         }
 
         step("Homebrew");
-        let (formulae, casks, cask_apps) = homebrew_sections();
+        let (formulae, casks, installed) = homebrew_sections();
         sections.insert("homebrew-formulae".into(), formulae);
         sections.insert("homebrew-casks".into(), casks);
 
         step("applications");
-        sections.insert("apps".into(), apps_section(&cask_apps));
+        sections.insert("apps".into(), apps_section(&installed));
 
         step("folders");
         for w in &cfg.watch {
@@ -323,9 +323,17 @@ pub fn read_plist_file(path: &Path) -> Option<Value> {
 
 // --------------------------------------------------------------- Homebrew
 
-/// Returns the formulae and casks sections, plus a map from app bundle name
-/// (e.g. "Ghostty.app") to the cask that installed it.
-fn homebrew_sections() -> (Section, Section, BTreeMap<String, String>) {
+/// An installed cask: the app bundle names it installs (e.g. "Ghostty.app")
+/// and its definition as JSON text, which names the app's bundle ID in its
+/// uninstall and zap steps.
+pub struct InstalledCask {
+    pub token: String,
+    pub apps: Vec<String>,
+    text: String,
+}
+
+/// Returns the formulae and casks sections, plus the installed casks.
+fn homebrew_sections() -> (Section, Section, Vec<InstalledCask>) {
     let formulae = match run_simple(&["brew", "leaves", "--installed-on-request"]) {
         Ok(o) if o.ok() => Section::ok(
             o.stdout
@@ -338,7 +346,7 @@ fn homebrew_sections() -> (Section, Section, BTreeMap<String, String>) {
         Ok(o) => Section::unavailable(crate::term::clip(o.stderr.trim(), 100)),
         Err(e) => Section::unavailable(format!("`brew`: {e}")),
     };
-    let mut cask_apps = BTreeMap::new();
+    let mut installed = Vec::new();
     let casks = match run(
         &["brew", "info", "--cask", "--json=v2", "--installed"],
         None,
@@ -357,9 +365,11 @@ fn homebrew_sections() -> (Section, Section, BTreeMap<String, String>) {
                         .unwrap_or("")
                         .to_string();
                     items.insert(token.to_string(), Value::Str(version));
-                    for app in cask_app_names(c) {
-                        cask_apps.insert(app, token.to_string());
-                    }
+                    installed.push(InstalledCask {
+                        token: token.to_string(),
+                        apps: cask_app_names(c),
+                        text: c.to_compact(),
+                    });
                 }
                 Section::ok(items)
             }
@@ -368,7 +378,22 @@ fn homebrew_sections() -> (Section, Section, BTreeMap<String, String>) {
         Ok(o) => Section::unavailable(crate::term::clip(o.stderr.trim(), 100)),
         Err(e) => Section::unavailable(format!("`brew`: {e}")),
     };
-    (formulae, casks, cask_apps)
+    (formulae, casks, installed)
+}
+
+/// Whether `text` names the bundle ID `id` as a whole identifier, possibly
+/// followed by a file suffix (`com.foo.app.plist`), but not as part of a
+/// longer word.
+pub fn mentions_id(text: &str, id: &str) -> bool {
+    if id.is_empty() {
+        return false;
+    }
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    text.match_indices(id).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + id.len()..].chars().next();
+        !before.is_some_and(|c| word(c) || c == '.') && !after.is_some_and(word)
+    })
 }
 
 /// App bundle names a cask installs, from its `artifacts` list.
@@ -404,7 +429,7 @@ fn file_name(s: &str) -> String {
 
 // ------------------------------------------------------------------- apps
 
-fn apps_section(cask_apps: &BTreeMap<String, String>) -> Section {
+fn apps_section(installed: &[InstalledCask]) -> Section {
     let mut bundles: Vec<PathBuf> = Vec::new();
     for dir in [
         "/Applications",
@@ -429,14 +454,27 @@ fn apps_section(cask_apps: &BTreeMap<String, String>) -> Section {
     if bundles.is_empty() && !util::sys("/Applications").exists() {
         return Section::unavailable("no /Applications folder");
     }
+    let by_name: BTreeMap<String, String> = installed
+        .iter()
+        .flat_map(|c| c.apps.iter().map(|a| (a.clone(), c.token.clone())))
+        .collect();
+    // Casks whose apps aren't where Homebrew put them: renamed or moved.
+    let app_dirs = [util::sys("/Applications"), expand("~/Applications")];
+    let displaced: Vec<&InstalledCask> = installed
+        .iter()
+        .filter(|c| !c.apps.is_empty() && !c.apps.iter().any(|a| app_dirs.iter().any(|d| d.join(a).exists())))
+        .collect();
     let results = par_map(bundles, 8, |path| {
-        let info = classify_app(&path, cask_apps);
+        let info = classify_app(&path, &by_name, &displaced);
         (util::tilde(&path), info)
     });
     Section::ok(results.into_iter().collect())
 }
 
-fn classify_app(path: &Path, cask_apps: &BTreeMap<String, String>) -> Value {
+/// Where an app came from. A Homebrew app that was renamed is matched to its
+/// cask by bundle ID, among casks whose apps are missing from where Homebrew
+/// put them, and records the name Homebrew knows it by.
+fn classify_app(path: &Path, by_name: &BTreeMap<String, String>, displaced: &[&InstalledCask]) -> Value {
     let name = file_name(&path.to_string_lossy());
     let is_link = std::fs::symlink_metadata(path)
         .map(|m| m.file_type().is_symlink())
@@ -458,10 +496,15 @@ fn classify_app(path: &Path, cask_apps: &BTreeMap<String, String>) -> Value {
         .unwrap_or("")
         .to_string();
     let p = path.to_string_lossy();
+    let renamed = || displaced.iter().find(|c| mentions_id(&c.text, &id));
+    let mut renamed_from = None;
     let source = if p.contains("/Nix Apps/") || p.contains("/Home Manager Apps/") {
         "nix".to_string()
-    } else if let Some(token) = cask_apps.get(&name) {
+    } else if let Some(token) = by_name.get(&name) {
         format!("homebrew:{token}")
+    } else if let Some(c) = renamed() {
+        renamed_from = c.apps.first().cloned();
+        format!("homebrew:{}", c.token)
     } else if path.join("Contents/_MASReceipt/receipt").exists() {
         "app-store".to_string()
     } else if is_link || id.starts_with("com.apple.") {
@@ -473,6 +516,9 @@ fn classify_app(path: &Path, cask_apps: &BTreeMap<String, String>) -> Value {
     o.insert("id".into(), Value::Str(id));
     o.insert("version".into(), Value::Str(version));
     o.insert("source".into(), Value::Str(source));
+    if let Some(from) = renamed_from {
+        o.insert("renamed_from".into(), Value::Str(from));
+    }
     Value::Obj(o)
 }
 
@@ -673,6 +719,21 @@ mod tests {
         assert_eq!(hidden.items.keys().collect::<Vec<_>>(), [".hidden"]);
         assert!(!dir_section(tmp.join("nope").to_str().unwrap(), false, &tmp).available);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn bundle_id_mentions() {
+        let cask = r#"{"artifacts":[{"uninstall":[{"signal":["TERM","com.crystalidea.macsfancontrol"]}]},{"zap":[{"trash":"~/Library/Preferences/com.crystalidea.macsfancontrol.plist"}]}]}"#;
+        assert!(mentions_id(cask, "com.crystalidea.macsfancontrol"));
+        assert!(
+            !mentions_id(cask, "com.crystalidea.macsfan"),
+            "part of a longer word"
+        );
+        assert!(
+            !mentions_id(cask, "crystalidea.macsfancontrol"),
+            "suffix of a longer ID"
+        );
+        assert!(!mentions_id(cask, ""));
     }
 
     #[test]

@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::json::{self, Value};
 use crate::util::{run, run_simple};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 #[derive(Default, Debug)]
@@ -113,22 +114,41 @@ pub fn tap_declared(bf: &Brewfile, tap: &str) -> bool {
     bf.taps.iter().any(|t| norm(t) == norm(tap))
 }
 
-/// Casks that would install an app with this bundle name, found by
-/// searching the local taps.
-pub fn casks_for_app(app_name: &str) -> Vec<String> {
+/// Every cask definition in the local taps, as (token, text), read once.
+fn tap_casks() -> &'static [(String, String)] {
+    static CASKS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    CASKS.get_or_init(|| {
+        let mut all = Vec::new();
+        let taps = crate::util::sys("/opt/homebrew/Library/Taps");
+        walk_casks(&taps, &mut |file, text| {
+            if let Some(stem) = file.file_stem() {
+                all.push((stem.to_string_lossy().into_owned(), text.to_string()));
+            }
+        });
+        all
+    })
+}
+
+/// Casks that would install this app: by its bundle name (`Foo.app`), or,
+/// when none installs it under that name (it was renamed), by its bundle
+/// ID, which casks name in their uninstall and zap steps.
+pub fn casks_for_app(app_name: &str, bundle_id: &str) -> Vec<String> {
     let needle = format!("app \"{app_name}\"");
-    let mut found = Vec::new();
-    let taps = crate::util::sys("/opt/homebrew/Library/Taps");
-    walk_casks(&taps, &mut |file, text| {
-        if text.contains(&needle)
-            && let Some(stem) = file.file_stem()
-        {
-            found.push(stem.to_string_lossy().into_owned());
-        }
-    });
-    found.sort();
-    found.dedup();
-    found
+    let tokens = |pred: &dyn Fn(&str) -> bool| -> Vec<String> {
+        let mut found: Vec<String> = tap_casks()
+            .iter()
+            .filter(|(_, text)| pred(text))
+            .map(|(token, _)| token.clone())
+            .collect();
+        found.sort();
+        found.dedup();
+        found
+    };
+    let by_name = tokens(&|text| text.contains(&needle));
+    if !by_name.is_empty() || bundle_id.is_empty() {
+        return by_name;
+    }
+    tokens(&|text| crate::snapshot::mentions_id(text, bundle_id))
 }
 
 /// The apps a cask installs, as paths relative to /Applications, read from

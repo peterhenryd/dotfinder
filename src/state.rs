@@ -142,16 +142,27 @@ impl IgnoredFile {
 
 /// `dotfinder/adopted.json` in the dotfiles repo, read by the dotfiles Nix
 /// module: `{"casks": [], "brews": [], "masApps": {name: id},
-/// "manualApps": [], "defaults": {domain: {key: value}}}`.
+/// "manualApps": [], "renames": {cask: {"from": app, "to": app}},
+/// "defaults": {domain: {key: value}}}`.
 /// `manualApps` are apps nothing can install, listed so a new Mac's audit
-/// names them.
+/// names them. `renames` are cask apps kept under a name of your own; the
+/// switch renames them after Homebrew installs them.
 pub struct AdoptedFile {
     path: PathBuf,
     pub casks: Vec<String>,
     pub brews: Vec<String>,
     pub mas_apps: BTreeMap<String, i64>,
     pub manual_apps: Vec<String>,
+    pub renames: BTreeMap<String, Rename>,
     pub defaults: BTreeMap<String, Value>,
+}
+
+/// A cask's app under a name of your own: `from` is the bundle name the
+/// cask installs, `to` the one you gave it, both relative to /Applications.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rename {
+    pub from: String,
+    pub to: String,
 }
 
 impl AdoptedFile {
@@ -177,6 +188,19 @@ impl AdoptedFile {
                 })
                 .unwrap_or_default(),
             manual_apps: list("manualApps"),
+            renames: v
+                .get("renames")
+                .and_then(Value::as_obj)
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(token, r)| {
+                            let from = r.get("from")?.as_str()?.to_string();
+                            let to = r.get("to")?.as_str()?.to_string();
+                            Some((token.clone(), Rename { from, to }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             defaults: v
                 .get("defaults")
                 .and_then(Value::as_obj)
@@ -231,6 +255,20 @@ impl AdoptedFile {
         o.insert(
             "manualApps".into(),
             Value::Arr(self.manual_apps.iter().cloned().map(Value::Str).collect()),
+        );
+        o.insert(
+            "renames".into(),
+            Value::Obj(
+                self.renames
+                    .iter()
+                    .map(|(token, r)| {
+                        let mut m = BTreeMap::new();
+                        m.insert("from".to_string(), Value::Str(r.from.clone()));
+                        m.insert("to".to_string(), Value::Str(r.to.clone()));
+                        (token.clone(), Value::Obj(m))
+                    })
+                    .collect(),
+            ),
         );
         o.insert("defaults".into(), Value::Obj(self.defaults.clone()));
         write_atomic(&self.path, Value::Obj(o).to_pretty().as_bytes())
@@ -290,12 +328,20 @@ mod tests {
         a.casks.push("ghostty".into());
         a.mas_apps.insert("Things 3".into(), 904280696);
         a.manual_apps.extend(["Zed".to_string(), "Zed".to_string()]);
+        a.renames.insert(
+            "macs-fan-control".into(),
+            Rename {
+                from: "Macs Fan Control.app".into(),
+                to: "Fan Control.app".into(),
+            },
+        );
         a.save().unwrap();
         let b = AdoptedFile::load(&cfg).unwrap();
         assert_eq!(b.casks, ["ghostty"]);
         assert_eq!(b.mas_apps.get("Things 3"), Some(&904280696));
         assert_eq!(b.manual_apps, ["Zed"]);
         assert_eq!(b.known_app_names(), ["Things 3", "Zed"]);
+        assert_eq!(b.renames["macs-fan-control"].to, "Fan Control.app");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

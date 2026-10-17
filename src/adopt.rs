@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::diff::{Change, Kind};
 use crate::json::Value;
 use crate::report::{describe, marker, section_label};
-use crate::state::{AdoptedFile, IgnoredFile};
+use crate::state::{AdoptedFile, IgnoredFile, Rename};
 use crate::term::{bold, choose, dim, yellow};
 use crate::util::{expand, tilde};
 
@@ -122,6 +122,7 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
             .to_string();
         let mut app_cask: Option<String> = None;
         let mut app_store_id: Option<i64> = None;
+        let mut app_rename: Option<(String, Rename)> = None;
 
         match (section, c.kind, &c.key) {
             ("homebrew-casks" | "homebrew-formulae", Kind::Added, None) => {
@@ -166,8 +167,38 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                     .and_then(|v| v.get("source"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if matches!(source, "manual" | "app-store") {
-                    app_cask = brew::casks_for_app(&format!("{app_name}.app")).into_iter().next();
+                if let (Some(token), Some(from)) = (
+                    source.strip_prefix("homebrew:"),
+                    value.and_then(|v| v.get("renamed_from")).and_then(Value::as_str),
+                ) {
+                    match c.item.strip_prefix("/Applications/") {
+                        Some(to) => {
+                            note = Some(format!(
+                                "Renamed from {from}, the name the cask `{token}` installs it under."
+                            ));
+                            app_rename = Some((
+                                token.to_string(),
+                                Rename {
+                                    from: from.to_string(),
+                                    to: to.to_string(),
+                                },
+                            ));
+                            options.push(('r', "keep the new name (switches rename it on any Mac)"));
+                        }
+                        None => {
+                            note = Some(format!(
+                                "Moved and renamed from /Applications/{from}; only renames inside /Applications can be kept."
+                            ))
+                        }
+                    }
+                } else if matches!(source, "manual" | "app-store") {
+                    let id = value
+                        .and_then(|v| v.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    app_cask = brew::casks_for_app(&format!("{app_name}.app"), id)
+                        .into_iter()
+                        .next();
                     if source == "app-store" {
                         app_store_id = brew::app_store_id(&expand(&c.item));
                     }
@@ -301,6 +332,12 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
             'n' => {
                 adopted.manual_apps.push(app_name.clone());
                 n_adopted += 1;
+            }
+            'r' => {
+                if let Some((token, r)) = app_rename.clone() {
+                    adopted.renames.insert(token, r);
+                    n_adopted += 1;
+                }
             }
             'i' => {
                 ignored.add(c.id());

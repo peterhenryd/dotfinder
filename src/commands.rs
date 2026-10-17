@@ -129,10 +129,10 @@ pub fn audit_list(cfg: &Config, show_all: bool) -> Result<(Vec<Change>, usize, O
         .filter(|w| !w.audit)
         .map(|w| format!("dir:{}", w.path))
         .collect();
-    let known_apps = AdoptedFile::load(cfg)
-        .map(|a| a.known_app_names())
+    let (known_apps, renamed) = AdoptedFile::load(cfg)
+        .map(|a| (a.known_app_names(), a.renames.keys().cloned().collect::<Vec<_>>()))
         .unwrap_or_default();
-    let all = audit_findings(&now, declared.as_ref(), &skip, &known_apps);
+    let all = audit_findings(&now, declared.as_ref(), &skip, &known_apps, &renamed);
     let total = all.len();
     let shown: Vec<Change> = all
         .into_iter()
@@ -150,7 +150,7 @@ pub fn audit(cfg: &Config, show_all: bool) -> Result<(), String> {
             green("Everything found is captured by the config or ignored.")
         );
     } else {
-        print_audit(&shown, &|name| brew::casks_for_app(name));
+        print_audit(&shown, &|name, id| brew::casks_for_app(name, id));
     }
 
     let missing = missing_manual_apps(cfg);
@@ -295,7 +295,12 @@ fn preflight(cfg: &Config) -> Result<bool, String> {
             println!("{} {}", green("Added to"), tilde(&cfg.adopted_path()));
             Ok(true)
         }
-        Some('c') => Ok(true),
+        Some('c') => {
+            // Homebrew uninstalls an app by the name its cask gave it.
+            let renames = AdoptedFile::load(cfg)?.renames;
+            crate::rename::restore(&renames, Some(&undeclared_casks));
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
@@ -364,6 +369,35 @@ pub fn rebuild(cfg: &Config, extra: &[String]) -> Result<(), String> {
         .map_err(|e| format!("couldn't run darwin-rebuild: {e}"))?;
     if !status.success() {
         return Err("darwin-rebuild failed; the baseline wasn't updated".into());
+    }
+    // The dotfiles' Nix module renames apps during the switch too; this
+    // covers configs without it.
+    crate::rename::apply(&AdoptedFile::load(cfg)?.renames);
+    println!();
+    baseline(cfg)
+}
+
+/// `brew upgrade`, with renamed apps under their Homebrew names while it runs.
+pub fn upgrade(cfg: &Config, extra: &[String]) -> Result<(), String> {
+    let renames = AdoptedFile::load(cfg)?.renames;
+    if !renames.is_empty() {
+        println!(
+            "{}",
+            bold("Giving renamed apps their Homebrew names for the upgrade:")
+        );
+    }
+    crate::rename::restore(&renames, None);
+    let status = std::process::Command::new("brew")
+        .arg("upgrade")
+        .args(extra)
+        .status()
+        .map_err(|e| format!("couldn't run brew: {e}"));
+    if !renames.is_empty() {
+        println!("{}", bold("Renaming them back:"));
+    }
+    crate::rename::apply(&renames);
+    if !status?.success() {
+        return Err("brew upgrade failed; the baseline wasn't updated".into());
     }
     println!();
     baseline(cfg)

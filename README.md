@@ -31,6 +31,7 @@ matches the config. Anything that differs later is drift.
 | Command | What it does |
 | --- | --- |
 | `dotfinder rebuild` | Warns about Homebrew packages the switch would uninstall, runs `darwin-rebuild switch`, then records a new baseline |
+| `dotfinder upgrade` | Runs `brew upgrade` with renamed apps under their Homebrew names for the duration, then records a new baseline |
 | `dotfinder drift` | What changed since the baseline |
 | `dotfinder audit` | Everything the config doesn't capture, changed recently or not |
 | `dotfinder adopt` | Walks through drift one change at a time: add it to the config, or ignore it from then on, publicly or privately |
@@ -47,13 +48,39 @@ matches the config. Anything that differs later is drift.
 dotfiles repo:
 
 - `dotfinder/adopted.json`: casks, formulae, App Store apps (`masApps`, by
-  store ID), apps to install by hand (`manualApps`, names only) and
-  preferences. A small Nix module reads it into `homebrew.casks`,
-  `homebrew.brews`, `homebrew.masApps` and
-  `system.defaults.CustomUserPreferences`.
+  store ID), apps to install by hand (`manualApps`, names only), renamed
+  cask apps (`renames`) and preferences. A small Nix module reads it into
+  `homebrew.casks`, `homebrew.brews`, `homebrew.masApps` and
+  `system.defaults.CustomUserPreferences`, and applies the renames.
 - `dotfinder/ignored.json`: ignore rules.
 
 Both must be tracked by git, or the flake can't see them.
+
+A minimal module:
+
+```nix
+{ lib, ... }:
+let
+  file = ./dotfinder/adopted.json;
+  adopted = if builtins.pathExists file then builtins.fromJSON (builtins.readFile file) else { };
+in
+{
+  homebrew.casks = adopted.casks or [ ];
+  homebrew.brews = adopted.brews or [ ] ++ lib.optional ((adopted.masApps or { }) != { }) "mas";
+  homebrew.masApps = adopted.masApps or { };
+  system.defaults.CustomUserPreferences = adopted.defaults or { };
+  system.activationScripts.postActivation.text = lib.concatStrings (
+    lib.mapAttrsToList (cask: r: ''
+      if [ -e "/Applications/${r.from}" ] && [ ! -e "/Applications/${r.to}" ]; then
+        mv "/Applications/${r.from}" "/Applications/${r.to}"
+      fi
+    '') (adopted.renames or { })
+  );
+}
+```
+
+`adopt` refuses preferences that hold dates or binary data (nix-darwin can't
+write them) and anything that looks like a secret.
 
 Ignoring something privately (`p` in `adopt`) writes the rule to
 `~/.local/share/dotfinder/ignored.json` instead, outside the repo, so the
@@ -71,24 +98,26 @@ For an app installed from the App Store or by hand, `adopt` offers:
 - listing it as an app to install by hand. `audit` then names it on any Mac
   where it's missing.
 
-A minimal module:
+Apps are matched to casks by bundle name first and by bundle ID second, so
+a renamed app is still recognized: casks name the app's bundle ID in their
+uninstall and zap steps.
 
-```nix
-{ lib, ... }:
-let
-  file = ./dotfinder/adopted.json;
-  adopted = if builtins.pathExists file then builtins.fromJSON (builtins.readFile file) else { };
-in
-{
-  homebrew.casks = adopted.casks or [ ];
-  homebrew.brews = adopted.brews or [ ] ++ lib.optional ((adopted.masApps or { }) != { }) "mas";
-  homebrew.masApps = adopted.masApps or { };
-  system.defaults.CustomUserPreferences = adopted.defaults or { };
-}
-```
+### Renaming apps
 
-`adopt` refuses preferences that hold dates or binary data (nix-darwin can't
-write them) and anything that looks like a secret.
+Homebrew keeps track of an app by the name its cask installs it under. A
+cask app you rename shows up in `audit` until `adopt` records the rename
+(`r`). With the rename recorded:
+
+- the switch renames the app after Homebrew installs it, so a new Mac gets
+  your name too (the module above does this; without it, `dotfinder rebuild`
+  does);
+- `dotfinder upgrade` gives it Homebrew's name while `brew upgrade` runs and
+  renames it back afterwards;
+- `dotfinder rebuild` gives it Homebrew's name back before the switch
+  uninstalls its cask, so nothing is left behind.
+
+`brew upgrade` skips apps that update themselves, so for those a rename
+only comes into play on install and uninstall.
 
 ## Ignore rules
 
