@@ -381,6 +381,26 @@ fn homebrew_sections() -> (Section, Section, Vec<InstalledCask>) {
     (formulae, casks, installed)
 }
 
+/// The installer packages that put this file in place, from the receipts
+/// macOS keeps (`pkgutil --file-info`). Apps copied by hand or from the App
+/// Store have none.
+fn pkg_receipts(path: &Path) -> Vec<String> {
+    let p = path.to_string_lossy();
+    run(&["pkgutil", "--file-info", &p], None, Duration::from_secs(10))
+        .ok()
+        .filter(|o| o.ok())
+        .map(|o| parse_pkg_receipts(&o.stdout))
+        .unwrap_or_default()
+}
+
+fn parse_pkg_receipts(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix("pkgid:"))
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
 /// Whether `text` names the bundle ID `id` as a whole identifier, possibly
 /// followed by a file suffix (`com.foo.app.plist`), but not as part of a
 /// longer word.
@@ -465,16 +485,24 @@ fn apps_section(installed: &[InstalledCask]) -> Section {
         .filter(|c| !c.apps.is_empty() && !c.apps.iter().any(|a| app_dirs.iter().any(|d| d.join(a).exists())))
         .collect();
     let results = par_map(bundles, 8, |path| {
-        let info = classify_app(&path, &by_name, &displaced);
+        let info = classify_app(&path, &by_name, &displaced, installed);
         (util::tilde(&path), info)
     });
     Section::ok(results.into_iter().collect())
 }
 
-/// Where an app came from. A Homebrew app that was renamed is matched to its
-/// cask by bundle ID, among casks whose apps are missing from where Homebrew
-/// put them, and records the name Homebrew knows it by.
-fn classify_app(path: &Path, by_name: &BTreeMap<String, String>, displaced: &[&InstalledCask]) -> Value {
+/// Where an app came from. Homebrew apps are matched to their cask by bundle
+/// name; apps a cask installs with a .pkg installer, by the installer
+/// receipt that lists the app (casks name their receipts in their uninstall
+/// step); and a Homebrew app that was renamed, by bundle ID among casks whose
+/// apps are missing from where Homebrew put them, recording the name
+/// Homebrew knows it by.
+fn classify_app(
+    path: &Path,
+    by_name: &BTreeMap<String, String>,
+    displaced: &[&InstalledCask],
+    installed: &[InstalledCask],
+) -> Value {
     let name = file_name(&path.to_string_lossy());
     let is_link = std::fs::symlink_metadata(path)
         .map(|m| m.file_type().is_symlink())
@@ -497,16 +525,24 @@ fn classify_app(path: &Path, by_name: &BTreeMap<String, String>, displaced: &[&I
         .to_string();
     let p = path.to_string_lossy();
     let renamed = || displaced.iter().find(|c| mentions_id(&c.text, &id));
+    let from_pkg = || {
+        let receipts = pkg_receipts(path);
+        installed
+            .iter()
+            .find(|c| receipts.iter().any(|r| mentions_id(&c.text, r)))
+    };
     let mut renamed_from = None;
     let source = if p.contains("/Nix Apps/") || p.contains("/Home Manager Apps/") {
         "nix".to_string()
     } else if let Some(token) = by_name.get(&name) {
         format!("homebrew:{token}")
+    } else if path.join("Contents/_MASReceipt/receipt").exists() {
+        "app-store".to_string()
+    } else if let Some(c) = from_pkg() {
+        format!("homebrew:{}", c.token)
     } else if let Some(c) = renamed() {
         renamed_from = c.apps.first().cloned();
         format!("homebrew:{}", c.token)
-    } else if path.join("Contents/_MASReceipt/receipt").exists() {
-        "app-store".to_string()
     } else if is_link || id.starts_with("com.apple.") {
         "apple".to_string()
     } else {
@@ -719,6 +755,15 @@ mod tests {
         assert_eq!(hidden.items.keys().collect::<Vec<_>>(), [".hidden"]);
         assert!(!dir_section(tmp.join("nope").to_str().unwrap(), false, &tmp).available);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pkgutil_receipts() {
+        let out = "volume: /\npath: /Applications/Karabiner-EventViewer.app\n\npkgid: org.pqrs.Karabiner-Elements\npkg-version: 16.3.0\ninstall-time: 1792148253\nuid: 0\n";
+        assert_eq!(parse_pkg_receipts(out), ["org.pqrs.Karabiner-Elements"]);
+        assert!(parse_pkg_receipts("").is_empty());
+        let cask = r#"{"artifacts":[{"uninstall":[{"pkgutil":["org.pqrs.Karabiner-DriverKit-VirtualHIDDevice","org.pqrs.Karabiner-Elements"]}]},{"pkg":["Karabiner-Elements.pkg"]}]}"#;
+        assert!(mentions_id(cask, "org.pqrs.Karabiner-Elements"));
     }
 
     #[test]

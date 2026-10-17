@@ -203,9 +203,20 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                         app_store_id = brew::app_store_id(&expand(&c.item));
                     }
                     let mut lines: Vec<String> = Vec::new();
+                    // A cask the config already declares: this is most likely
+                    // that cask's copy, installed in a way dotfinder can't
+                    // trace, so replacing it would be wrong.
+                    if let Some(cask) = app_cask.clone()
+                        && declared.is_some_and(|bf| bf.declares_cask(&cask))
+                    {
+                        lines.push(format!(
+                            "The config already declares the cask `{cask}`, so this is probably its copy. If so, ignore it."
+                        ));
+                        app_cask = None;
+                    }
                     match &app_cask {
                         Some(cask) => lines.push(format!("Homebrew has it as the cask `{cask}`.")),
-                        None if source == "manual" => {
+                        None if source == "manual" && lines.is_empty() => {
                             lines.push("Installed by hand, and no cask installs it.".into())
                         }
                         None => {}
