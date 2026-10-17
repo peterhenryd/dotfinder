@@ -1,0 +1,17 @@
+[package]
+name = "dotfinder"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Finds what on a Mac isn't captured by its declarative config, and keeps private files in a KeePassXC vault"
+repository = "https://github.com/peterhenryd/dotfinder"
+
+# No dependencies on purpose: the tool reads private machine state, so it
+# carries no third-party code.
+[dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,290 @@
+//! The top-level commands other than `adopt` and `vault`.
+
+use crate::brew::{self, Brewfile};
+use crate::config::Config;
+use crate::diff::{Change, diff};
+use crate::report::{audit_findings, print_audit, print_changes};
+use crate::snapshot::{Snapshot, current_generation};
+use crate::state::{self, AdoptedFile, latest_baseline};
+use crate::term::{bold, choose, dim, green, heading, red, warn, yellow};
+use crate::util::{self, tilde};
+
+pub fn baseline(cfg: &Config) -> Result<(), String> {
+    eprintln!("Recording the current state as the baseline…");
+    let s = Snapshot::take(cfg, "baseline", true);
+    let path = state::save_baseline(&s).map_err(|e| e.to_string())?;
+    report_unavailable(&s);
+    println!("{} {}", green("Baseline recorded:"), tilde(&path));
+    Ok(())
+}
+
+pub fn snapshot(cfg: &Config) -> Result<(), String> {
+    let s = Snapshot::take(cfg, "manual", true);
+    print!("{}", s.to_value().to_pretty());
+    Ok(())
+}
+
+fn report_unavailable(s: &Snapshot) {
+    let missing: Vec<String> = s
+        .sections
+        .iter()
+        .filter(|(n, sec)| !sec.available && !n.starts_with("cmd:") && !n.starts_with("dir:"))
+        .map(|(n, sec)| format!("{n} ({})", sec.note.as_deref().unwrap_or("unavailable")))
+        .collect();
+    if !missing.is_empty() {
+        warn(&format!("couldn't read: {}", missing.join(", ")));
+    }
+}
+
+/// Changes since the baseline, split into shown and ignored.
+pub struct DriftResult {
+    pub shown: Vec<Change>,
+    pub hidden: usize,
+}
+
+pub fn compute_drift(
+    cfg: &Config,
+    show_all: bool,
+) -> Result<Option<(DriftResult, Snapshot, Snapshot)>, String> {
+    let Some(base) = latest_baseline()? else {
+        println!(
+            "There's no baseline yet. Record one with {} (or {}, which records one after every switch).",
+            bold("dotfinder baseline"),
+            bold("dotfinder rebuild")
+        );
+        return Ok(None);
+    };
+    let ignores = state::ignores(cfg)?;
+    eprintln!(
+        "Comparing with the baseline from {}…",
+        util::age(util::now_unix().saturating_sub(base.taken_at))
+    );
+    let now = Snapshot::take(cfg, "manual", true);
+    let d = diff(&base, &now);
+    let mut shown = Vec::new();
+    let mut hidden = 0;
+    for c in d.changes {
+        if !show_all && ignores.matches(&c) {
+            hidden += 1;
+        } else {
+            shown.push(c);
+        }
+    }
+    for (section, why) in &d.skipped {
+        warn(&format!("{section} wasn't compared: {why}"));
+    }
+    Ok(Some((DriftResult { shown, hidden }, base, now)))
+}
+
+fn generation_warning(base: &Snapshot) {
+    let current = current_generation();
+    if base.generation.is_some() && current.is_some() && base.generation != current {
+        warn(
+            "the system was rebuilt after this baseline was recorded, so some changes below come from the rebuild. \
+             `dotfinder rebuild` records a new baseline automatically; `dotfinder baseline` records one now.",
+        );
+    }
+}
+
+pub fn drift(cfg: &Config, show_all: bool) -> Result<(), String> {
+    let Some((r, base, _now)) = compute_drift(cfg, show_all)? else {
+        return Ok(());
+    };
+    generation_warning(&base);
+    let declared = brew::current_brewfile();
+    if r.shown.is_empty() {
+        println!("\n{}", green("Nothing has changed since the baseline."));
+    } else {
+        print_changes(&r.shown, declared.as_ref());
+    }
+    if r.hidden > 0 {
+        println!(
+            "\n{}",
+            dim(&format!(
+                "{} changes hidden by ignore rules (`dotfinder drift --all` shows them).",
+                r.hidden
+            ))
+        );
+    }
+    if !r.shown.is_empty() {
+        println!(
+            "\nNext: {} to add these to the config or ignore them.",
+            bold("dotfinder adopt")
+        );
+    }
+    Ok(())
+}
+
+pub fn audit_list(cfg: &Config, show_all: bool) -> Result<(Vec<Change>, usize, Option<Brewfile>), String> {
+    let ignores = state::ignores(cfg)?;
+    eprintln!("Reading the current state…");
+    let now = Snapshot::take(cfg, "manual", true);
+    let declared = brew::current_brewfile();
+    if declared.is_none() {
+        warn("couldn't find the active nix-darwin Brewfile, so Homebrew packages aren't checked");
+    }
+    let skip: Vec<String> = cfg
+        .watch
+        .iter()
+        .filter(|w| !w.audit)
+        .map(|w| format!("dir:{}", w.path))
+        .collect();
+    let all = audit_findings(&now, declared.as_ref(), &skip);
+    let total = all.len();
+    let shown: Vec<Change> = all
+        .into_iter()
+        .filter(|c| show_all || !ignores.matches(c))
+        .collect();
+    let hidden = total - shown.len();
+    Ok((shown, hidden, declared))
+}
+
+pub fn audit(cfg: &Config, show_all: bool) -> Result<(), String> {
+    let (shown, hidden, _) = audit_list(cfg, show_all)?;
+    if shown.is_empty() {
+        println!(
+            "\n{}",
+            green("Everything found is captured by the config or ignored.")
+        );
+    } else {
+        print_audit(&shown, &|name| brew::casks_for_app(name));
+    }
+
+    let pending = crate::vault::pending(cfg);
+    if !pending.is_empty() {
+        heading("Vault");
+        for p in &pending {
+            println!("  {} {p}", yellow("!"));
+        }
+        println!("  {}", dim("`dotfinder vault backup` saves them."));
+    }
+
+    heading("Baseline");
+    match latest_baseline()? {
+        None => println!("  {} none recorded yet (`dotfinder baseline`)", yellow("!")),
+        Some(b) => {
+            let age = util::age(util::now_unix().saturating_sub(b.taken_at));
+            if b.generation.is_some() && b.generation != current_generation() {
+                println!("  {} recorded {age}, before the last rebuild", yellow("!"));
+            } else {
+                println!("  {} recorded {age}", green("✓"));
+            }
+        }
+    }
+
+    if hidden > 0 {
+        println!(
+            "\n{}",
+            dim(&format!(
+                "{hidden} findings hidden by ignore rules (`dotfinder audit --all` shows them)."
+            ))
+        );
+    }
+    if !shown.is_empty() {
+        println!(
+            "\nNext: {} to go through these one by one.",
+            bold("dotfinder adopt --audit")
+        );
+    }
+    Ok(())
+}
+
+/// Before a switch: Homebrew packages installed but not declared, which the
+/// switch's cleanup step would uninstall. Returns false to abort.
+fn preflight(cfg: &Config) -> Result<bool, String> {
+    eprintln!("Checking what the rebuild would uninstall…");
+    let declared = match brew::declared_brewfile(cfg) {
+        Ok(b) => b,
+        Err(e) => {
+            println!(
+                "{}\n{e}",
+                red("Couldn't evaluate the config, so the rebuild would fail too.")
+            );
+            return Ok(false);
+        }
+    };
+    let leaves = util::run_simple(&["brew", "leaves", "--installed-on-request"]);
+    let casks = util::run_simple(&["brew", "list", "--cask"]);
+    let (Ok(leaves), Ok(casks)) = (leaves, casks) else {
+        warn("couldn't ask Homebrew what's installed; skipping the check");
+        return Ok(true);
+    };
+    let undeclared_brews: Vec<String> = leaves
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && !declared.declares_brew(n))
+        .map(str::to_string)
+        .collect();
+    let undeclared_casks: Vec<String> = casks
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && !declared.declares_cask(n))
+        .map(str::to_string)
+        .collect();
+    if undeclared_brews.is_empty() && undeclared_casks.is_empty() {
+        return Ok(true);
+    }
+    println!(
+        "\n{}",
+        bold("Installed with Homebrew but not in the config. The rebuild will uninstall:")
+    );
+    for c in &undeclared_casks {
+        println!("  {} {c} {}", red("-"), dim("(cask)"));
+    }
+    for b in &undeclared_brews {
+        println!("  {} {b} {}", red("-"), dim("(formula)"));
+    }
+    let answer = choose(
+        "\nWhat now?",
+        &[
+            ('a', "add them all to the config"),
+            ('c', "continue and uninstall them"),
+            ('q', "stop"),
+        ],
+    );
+    match answer {
+        Some('a') => {
+            let mut adopted = AdoptedFile::load(cfg)?;
+            for c in undeclared_casks {
+                let tap = brew::tap_of(true, &c);
+                adopted.casks.push(qualify(tap.as_deref(), &c));
+            }
+            for b in undeclared_brews {
+                let tap = brew::tap_of(false, &b);
+                adopted.brews.push(qualify(tap.as_deref(), &b));
+            }
+            adopted.save().map_err(|e| e.to_string())?;
+            println!("{} {}", green("Added to"), tilde(&cfg.adopted_path()));
+            Ok(true)
+        }
+        Some('c') => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+fn qualify(tap: Option<&str>, name: &str) -> String {
+    match tap {
+        Some("homebrew/core" | "homebrew/cask") | None => name.to_string(),
+        Some(t) => format!("{t}/{name}"),
+    }
+}
+
+pub fn rebuild(cfg: &Config, extra: &[String]) -> Result<(), String> {
+    if !preflight(cfg)? {
+        return Err("stopped before rebuilding".into());
+    }
+    let flake = cfg.dotfiles.display().to_string();
+    println!("\n{} {}", bold("Switching to"), tilde(&cfg.dotfiles));
+    let status = std::process::Command::new("sudo")
+        .args(["darwin-rebuild", "switch", "--flake", &flake])
+        .args(extra)
+        .status()
+        .map_err(|e| format!("couldn't run darwin-rebuild: {e}"))?;
+    if !status.success() {
+        return Err("darwin-rebuild failed; the baseline wasn't updated".into());
+    }
+    println!();
+    baseline(cfg)
+}
