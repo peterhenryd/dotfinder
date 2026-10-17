@@ -87,6 +87,11 @@ see [Python tools](#python-tools).
 `adopt` refuses preferences that hold dates or binary data (nix-darwin can't
 write them) and anything that looks like a secret.
 
+For a folder, `l` in `adopt` lists what's in it. Most folders in ~ hold a
+tool's own data and are best ignored; for a few tools' folders (Cargo,
+Gemini CLI, GnuPG), `adopt` names the settings files in them worth moving
+into the repo and the credentials to keep out of it.
+
 Ignoring something privately (`p` in `adopt`) writes the rule to
 `~/.local/share/dotfinder/ignored.json` instead, outside the repo, so the
 name of what it hides isn't published. Back that file up with the vault.

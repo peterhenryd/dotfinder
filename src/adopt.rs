@@ -68,6 +68,7 @@ pub fn looks_secret(key: &str, v: &Value) -> bool {
 const IGNORE: (char, &str) = ('i', "ignore from now on");
 const PRIVATE: (char, &str) = ('p', "ignore privately");
 const SKIP: (char, &str) = ('s', "skip for now");
+const LOOK: (char, &str) = ('l', "show what's inside");
 const QUIT: (char, &str) = ('q', "save and quit");
 
 /// The name to add to the config for a Homebrew package, with its tap
@@ -123,6 +124,8 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
         let mut app_cask: Option<String> = None;
         let mut app_store_id: Option<i64> = None;
         let mut app_rename: Option<(String, Rename)> = None;
+        // A folder `l` lists the contents of.
+        let mut folder: Option<std::path::PathBuf> = None;
 
         match (section, c.kind, &c.key) {
             ("homebrew-casks" | "homebrew-formulae", Kind::Added, None) => {
@@ -242,10 +245,12 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
                 }
             }
             (s, Kind::Added, None) if s.starts_with("dir:") => {
-                note = Some(format!(
-                    "To manage it, move it into your dotfiles repo and link it from a home-manager module. Check it for secrets first: {} is public.",
-                    tilde(&cfg.dotfiles)
-                ));
+                let path = expand(&s[4..]).join(&c.item);
+                note = Some(crate::folders::note(&path, &s[4..] == "~", value, &cfg.dotfiles));
+                if value.and_then(|v| v.get("kind")).and_then(Value::as_str) == Some("folder") {
+                    options.push(LOOK);
+                    folder = Some(path);
+                }
             }
             ("cmd:login-items", Kind::Added, None) => {
                 note = Some(
@@ -273,8 +278,18 @@ pub fn adopt(cfg: &Config, mut changes: Vec<Change>, declared: Option<&Brewfile>
         options.push(SKIP);
         options.push(QUIT);
 
-        let Some(answer) = choose("  ", &options) else {
-            break 'outer;
+        let answer = loop {
+            let Some(a) = choose("  ", &options) else {
+                break 'outer;
+            };
+            match (&folder, a) {
+                (Some(dir), 'l') => {
+                    for line in crate::folders::listing(dir, &cfg.dotfiles, 40) {
+                        println!("    {}", dim(&line));
+                    }
+                }
+                _ => break a,
+            }
         };
         match answer {
             'a' => match (section, &c.key) {

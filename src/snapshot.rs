@@ -601,7 +601,10 @@ fn dir_section(path: &str, hidden_only: bool, dotfiles: &Path) -> Section {
         };
         let mut o = BTreeMap::new();
         o.insert("kind".into(), Value::Str(kind.into()));
-        if meta.is_dir() {
+        if meta.is_dir() && std::fs::canonicalize(&p).is_ok_and(|t| t == dotfiles) {
+            // The dotfiles repo itself.
+            o.insert("managed".into(), Value::Bool(true));
+        } else if meta.is_dir() {
             // home-manager creates real folders holding managed links (e.g.
             // ~/.config/git/config); a folder counts as managed when
             // everything in it is.
@@ -630,7 +633,7 @@ fn dir_section(path: &str, hidden_only: bool, dotfiles: &Path) -> Section {
 /// launch agents) for the current system generation.
 const DARWIN_USER_FILES: &str = "/run/current-system/user";
 
-fn is_managed(p: &Path, dotfiles: &Path) -> bool {
+pub fn is_managed(p: &Path, dotfiles: &Path) -> bool {
     is_managed_link(p, dotfiles) || is_darwin_copy(p, &util::home(), Path::new(DARWIN_USER_FILES))
 }
 
@@ -763,6 +766,9 @@ mod tests {
         );
         assert_eq!(s.items["sub"].get("managed"), Some(&Value::Bool(false)));
         assert_eq!(s.items[".hidden"].get("managed"), Some(&Value::Bool(false)));
+        // The repo itself, when it sits in a watched folder.
+        let parent = dir_section(tmp.to_str().unwrap(), false, &tmp.join("dotfiles"));
+        assert_eq!(parent.items["dotfiles"].get("managed"), Some(&Value::Bool(true)));
         let hidden = dir_section(tmp.join("watched").to_str().unwrap(), true, &tmp.join("dotfiles"));
         assert_eq!(hidden.items.keys().collect::<Vec<_>>(), [".hidden"]);
         assert!(!dir_section(tmp.join("nope").to_str().unwrap(), false, &tmp).available);

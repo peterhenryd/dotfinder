@@ -6,6 +6,7 @@ mod brew;
 mod commands;
 mod config;
 mod diff;
+mod folders;
 mod homeapps;
 mod json;
 mod plist;
