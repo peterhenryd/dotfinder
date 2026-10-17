@@ -21,7 +21,12 @@ pub struct Config {
     pub watch: Vec<Watch>,
     pub collectors: Vec<Collector>,
     pub vault: Option<Vault>,
+    /// Where `dotfinder apps backup` copies your own things from
+    /// ~/Applications; a folder in iCloud Drive by default.
+    pub apps_backup: PathBuf,
 }
+
+const APPS_BACKUP: &str = "~/Library/Mobile Documents/com~apple~CloudDocs/Backups/Applications";
 
 pub struct Watch {
     pub path: String,
@@ -162,6 +167,12 @@ impl Config {
             _ => None,
         };
 
+        let apps_backup = expand(
+            v.get("apps_backup")
+                .and_then(Value::as_str)
+                .unwrap_or(APPS_BACKUP),
+        );
+
         Ok(Config {
             dotfiles,
             host,
@@ -171,6 +182,7 @@ impl Config {
             watch,
             collectors,
             vault,
+            apps_backup,
         })
     }
 

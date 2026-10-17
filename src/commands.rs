@@ -172,6 +172,18 @@ pub fn audit(cfg: &Config, show_all: bool) -> Result<(), String> {
         );
     }
 
+    let apps = crate::homeapps::pending(cfg);
+    if !apps.is_empty() {
+        heading("Your apps in ~/Applications");
+        for p in &apps {
+            println!("  {} {p}", yellow("!"));
+        }
+        println!(
+            "  {}",
+            dim("`dotfinder apps backup` copies them to iCloud Drive.")
+        );
+    }
+
     let pending = crate::vault::pending(cfg);
     if !pending.is_empty() {
         heading("Vault");

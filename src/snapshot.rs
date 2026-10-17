@@ -543,6 +543,13 @@ fn classify_app(
     } else if let Some(c) = renamed() {
         renamed_from = c.apps.first().cloned();
         format!("homebrew:{}", c.token)
+    } else if crate::homeapps::is_home_app(&util::tilde(path)) {
+        // Your own things, backed up with `dotfinder apps`, or things a tool
+        // made and recreates.
+        match crate::homeapps::made_by(path) {
+            Some(tool) => format!("made-by:{tool}"),
+            None => "yours".to_string(),
+        }
     } else if is_link || id.starts_with("com.apple.") {
         "apple".to_string()
     } else {

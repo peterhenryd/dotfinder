@@ -57,7 +57,7 @@ pub fn latest_baseline() -> Result<Option<Snapshot>, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn read_json(path: &Path) -> Result<Value, String> {
+pub fn read_json(path: &Path) -> Result<Value, String> {
     match std::fs::read_to_string(path) {
         Ok(t) if t.trim().is_empty() => Ok(Value::obj()),
         Ok(t) => json::parse(&t).map_err(|e| format!("{}: {e}", path.display())),

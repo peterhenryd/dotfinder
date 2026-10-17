@@ -38,6 +38,7 @@ matches the config. Anything that differs later is drift.
 | `dotfinder adopt --audit` | The same, for audit findings |
 | `dotfinder push` | Shows what changed in the dotfiles repo, asks for a commit message, commits everything and pushes |
 | `dotfinder baseline` | Records the current state as the baseline |
+| `dotfinder apps status / backup / restore` | Keeps your own things in ~/Applications backed up in iCloud Drive |
 | `dotfinder vault status / backup / restore` | Keeps the configured private files in the vault |
 | `dotfinder snapshot` | Prints the current state as JSON |
 
@@ -107,6 +108,22 @@ remove and asks first.
 Apps are matched to casks by bundle name first and by bundle ID second, so
 a renamed app is still recognized: casks name the app's bundle ID in their
 uninstall and zap steps.
+
+### ~/Applications
+
+`/Applications` is treated as installed software, which Homebrew or the App
+Store can reinstall. `~/Applications` is treated as yours: web apps, scripts
+saved as apps, folders of aliases. Nothing can reinstall those, so instead
+of adopting them, `dotfinder apps backup` copies them (with `ditto`, which
+keeps app bundles intact) to `~/Library/Mobile Documents/com~apple~CloudDocs/Backups/Applications`
+(`apps_backup` in the config changes it), and `dotfinder apps restore` copies
+back any that are missing. `audit` lists the ones not backed up as they are
+now.
+
+Things other tools put there and recreate on their own are skipped: Home
+Manager's apps folder, Parallels' folders of Windows app shortcuts, and
+JetBrains Toolbox's IDEs. An ignore rule skips anything else, such as
+`apps:~/Applications/Claude Code URL Handler.app`.
 
 ### Renaming apps
 

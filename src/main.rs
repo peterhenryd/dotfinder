@@ -6,6 +6,7 @@ mod brew;
 mod commands;
 mod config;
 mod diff;
+mod homeapps;
 mod json;
 mod plist;
 mod rename;
@@ -39,6 +40,9 @@ Commands:
   push             Commit what changed in the dotfiles repo, with a message
                    you type, and push it.
   baseline         Record the current state as the baseline.
+  apps status      Which of your own things in ~/Applications are backed up.
+  apps backup      Copy them to the backup folder in iCloud Drive.
+  apps restore     Copy backed-up ones that are missing back.
   vault status     Which private files are backed up in the vault.
   vault backup     Copy the configured private files into the vault.
   vault restore    Write them back from the vault.
@@ -89,6 +93,14 @@ fn main() {
                 })
             }
         }
+        "apps" => match args.get(1).map(String::as_str) {
+            Some("status") | None => homeapps::status(&cfg),
+            Some("backup") => homeapps::backup(&cfg),
+            Some("restore") => homeapps::restore(&cfg),
+            Some(other) => Err(format!(
+                "unknown apps command `{other}` (status, backup, restore)"
+            )),
+        },
         "vault" => match args.get(1).map(String::as_str) {
             Some("status") | None => vault::status(&cfg),
             Some("backup") => vault::backup(&cfg),

@@ -58,9 +58,11 @@ fn item_detail(section: &str, v: &Value) -> String {
         let source = v.get("source").and_then(Value::as_str).unwrap_or("?");
         return match source {
             "manual" => "installed by hand".into(),
+            "yours" => "yours, backed up with `dotfinder apps backup`".into(),
             "app-store" => "App Store".into(),
             "apple" => "Apple".into(),
             "nix" => "Nix".into(),
+            s if s.starts_with("made-by:") => format!("made by {}", &s["made-by:".len()..]),
             s => match (
                 s.strip_prefix("homebrew:"),
                 v.get("renamed_from").and_then(Value::as_str),
