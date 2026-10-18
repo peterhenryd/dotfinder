@@ -611,8 +611,10 @@ fn dir_section(path: &str, hidden_only: bool, dotfiles: &Path) -> Section {
         };
         let mut o = BTreeMap::new();
         o.insert("kind".into(), Value::Str(kind.into()));
-        if meta.is_dir() && std::fs::canonicalize(&p).is_ok_and(|t| t == dotfiles) {
-            // The dotfiles repo itself.
+        if meta.is_dir()
+            && (std::fs::canonicalize(&p).is_ok_and(|t| t == dotfiles) || is_hm_fonts(&p, &dotfiles))
+        {
+            // The dotfiles repo itself, or Home Manager's copied fonts.
             o.insert("managed".into(), Value::Bool(true));
         } else if meta.is_dir() {
             // home-manager creates real folders holding managed links (e.g.
@@ -644,7 +646,10 @@ fn dir_section(path: &str, hidden_only: bool, dotfiles: &Path) -> Section {
 const DARWIN_USER_FILES: &str = "/run/current-system/user";
 
 pub fn is_managed(p: &Path, dotfiles: &Path) -> bool {
-    is_managed_link(p, dotfiles) || is_darwin_copy(p, &util::home(), Path::new(DARWIN_USER_FILES))
+    let home = util::home();
+    is_managed_link(p, dotfiles)
+        || is_darwin_copy(p, &home, Path::new(DARWIN_USER_FILES))
+        || is_hm_agent_copy(p, &home, &hm_generation())
 }
 
 /// A symlink into the Nix store or into the dotfiles repo (home-manager's
@@ -667,8 +672,41 @@ fn is_darwin_copy(p: &Path, home: &Path, darwin_user: &Path) -> bool {
     let Ok(rel) = p.strip_prefix(home) else {
         return false;
     };
+    is_copy_of(p, &darwin_user.join(rel))
+}
+
+/// Home Manager's current generation, which keeps the originals of the
+/// launch agents it copies into ~/Library/LaunchAgents.
+fn hm_generation() -> PathBuf {
+    let state = match std::env::var_os("XDG_STATE_HOME") {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => util::home().join(".local/state"),
+    };
+    state.join("home-manager/gcroots/current-home")
+}
+
+/// A launch agent in ~/Library/LaunchAgents identical to the one in Home
+/// Manager's current generation. Home Manager copies them because launchd
+/// doesn't load linked agents; one edited by hand no longer counts.
+fn is_hm_agent_copy(p: &Path, home: &Path, generation: &Path) -> bool {
+    p.parent() == Some(home.join("Library/LaunchAgents").as_path())
+        && p.file_name()
+            .is_some_and(|n| is_copy_of(p, &generation.join("LaunchAgents").join(n)))
+}
+
+/// Home Manager copies the fonts that packages bring into
+/// ~/Library/Fonts/HomeManager, because macOS ignores linked fonts. Next to
+/// it is a managed link recording which fonts it copied.
+fn is_hm_fonts(p: &Path, dotfiles: &Path) -> bool {
+    p.file_name().is_some_and(|n| n == "HomeManager")
+        && p.parent()
+            .is_some_and(|d| is_managed_link(&d.join(".home-manager-fonts-version"), dotfiles))
+}
+
+/// `p` is a regular file with the same contents as `original`.
+fn is_copy_of(p: &Path, original: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file())
-        && match (std::fs::read(p), std::fs::read(darwin_user.join(rel))) {
+        && match (std::fs::read(p), std::fs::read(original)) {
             (Ok(a), Ok(b)) => a == b,
             _ => false,
         }
@@ -860,6 +898,46 @@ mod tests {
             !is_darwin_copy(&tmp.join("store.plist"), &home, &sys),
             "outside home"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn home_manager_copies() {
+        let tmp = std::env::temp_dir().join(format!("dotfinder-hm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (home, generation) = (tmp.join("home"), tmp.join("generation"));
+        let agents = home.join("Library/LaunchAgents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::create_dir_all(generation.join("LaunchAgents")).unwrap();
+        std::fs::write(generation.join("LaunchAgents/a.plist"), "<plist/>").unwrap();
+        std::fs::write(agents.join("a.plist"), "<plist/>").unwrap();
+        std::fs::write(agents.join("b.plist"), "<plist/>").unwrap();
+        assert!(is_hm_agent_copy(&agents.join("a.plist"), &home, &generation));
+        assert!(
+            !is_hm_agent_copy(&agents.join("b.plist"), &home, &generation),
+            "not Home Manager's"
+        );
+        std::fs::write(home.join("a.plist"), "<plist/>").unwrap();
+        assert!(
+            !is_hm_agent_copy(&home.join("a.plist"), &home, &generation),
+            "not in LaunchAgents"
+        );
+
+        let fonts = home.join("Library/Fonts");
+        std::fs::create_dir_all(fonts.join("HomeManager")).unwrap();
+        let dotfiles = tmp.join("dotfiles");
+        assert!(
+            !is_hm_fonts(&fonts.join("HomeManager"), &dotfiles),
+            "no version link"
+        );
+        std::os::unix::fs::symlink(
+            "/nix/store/x-home-manager-fonts",
+            fonts.join(".home-manager-fonts-version"),
+        )
+        .unwrap();
+        assert!(is_hm_fonts(&fonts.join("HomeManager"), &dotfiles));
+        let s = dir_section(fonts.to_str().unwrap(), false, &dotfiles);
+        assert_eq!(s.items["HomeManager"].get("managed"), Some(&Value::Bool(true)));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
