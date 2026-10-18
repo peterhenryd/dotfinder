@@ -40,20 +40,31 @@ pub fn sys(path: &str) -> PathBuf {
     }
 }
 
-pub fn state_dir() -> PathBuf {
-    match std::env::var_os("XDG_STATE_HOME") {
-        Some(p) if !p.is_empty() => PathBuf::from(p).join("dotfinder"),
-        _ => home().join(".local/state/dotfinder"),
+/// An XDG base directory: the variable's value, or `default` under the
+/// home folder when it's unset or empty.
+fn xdg(var: &str, default: &str) -> PathBuf {
+    match std::env::var_os(var) {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => home().join(default),
     }
+}
+
+pub fn xdg_state_home() -> PathBuf {
+    xdg("XDG_STATE_HOME", ".local/state")
+}
+
+pub fn xdg_data_home() -> PathBuf {
+    xdg("XDG_DATA_HOME", ".local/share")
+}
+
+pub fn state_dir() -> PathBuf {
+    xdg_state_home().join("dotfinder")
 }
 
 /// Data that belongs to this Mac's user rather than to the config, such as
 /// private ignore rules.
 pub fn data_dir() -> PathBuf {
-    match std::env::var_os("XDG_DATA_HOME") {
-        Some(p) if !p.is_empty() => PathBuf::from(p).join("dotfinder"),
-        _ => home().join(".local/share/dotfinder"),
-    }
+    xdg_data_home().join("dotfinder")
 }
 
 /// FNV-1a, 64-bit. Used to notice changes, never for security.

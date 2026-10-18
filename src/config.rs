@@ -305,7 +305,30 @@ fn default_collectors() -> Vec<Collector> {
 }
 
 /// Item names from a collector's output.
+/// `text` without ANSI escape sequences (colors, bold).
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            // Parameters and intermediates, then one final byte in @..~.
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 pub fn collector_items(c: &Collector, output: &str) -> Result<Vec<String>, String> {
+    // Some commands color their output even when it isn't a terminal
+    // (`nix profile list` bolds names); the codes would end up in item names.
+    let output = &strip_ansi(output);
     if let Some(path) = &c.json_keys {
         let v = json::parse(output).map_err(|e| e.to_string())?;
         return Ok(v
@@ -370,6 +393,8 @@ mod tests {
             collector_items(&find("nix-profile"), out).unwrap(),
             ["hello", "jq"]
         );
+        let colored = "Name:               \u{1b}[1mhello\u{1b}[0m\n";
+        assert_eq!(collector_items(&find("nix-profile"), colored).unwrap(), ["hello"]);
     }
 
     #[test]

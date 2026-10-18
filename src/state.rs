@@ -88,6 +88,7 @@ pub fn private_ignored_path() -> PathBuf {
 
 /// Ignore rules, `{"ignore": [patterns]}`: `dotfinder/ignored.json` in the
 /// dotfiles repo, or the private file outside it.
+#[derive(Default)]
 pub struct IgnoredFile {
     path: PathBuf,
     private: bool,

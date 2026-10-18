@@ -656,10 +656,7 @@ pub fn is_managed(p: &Path, dotfiles: &Path) -> bool {
 /// out-of-store links go through the store first), or one of the command
 /// links `uv tool install` makes, which the uv tools list covers.
 fn is_managed_link(p: &Path, dotfiles: &Path) -> bool {
-    let uv_tools = match std::env::var_os("XDG_DATA_HOME") {
-        Some(d) if !d.is_empty() => PathBuf::from(d).join("uv/tools"),
-        _ => util::home().join(".local/share/uv/tools"),
-    };
+    let uv_tools = util::xdg_data_home().join("uv/tools");
     std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
         && (std::fs::read_link(p).is_ok_and(|t| t.starts_with("/nix/store") || t.starts_with(&uv_tools))
             || std::fs::canonicalize(p).is_ok_and(|t| t.starts_with(dotfiles)))
@@ -678,11 +675,7 @@ fn is_darwin_copy(p: &Path, home: &Path, darwin_user: &Path) -> bool {
 /// Home Manager's current generation, which keeps the originals of the
 /// launch agents it copies into ~/Library/LaunchAgents.
 fn hm_generation() -> PathBuf {
-    let state = match std::env::var_os("XDG_STATE_HOME") {
-        Some(d) if !d.is_empty() => PathBuf::from(d),
-        _ => util::home().join(".local/state"),
-    };
-    state.join("home-manager/gcroots/current-home")
+    util::xdg_state_home().join("home-manager/gcroots/current-home")
 }
 
 /// A launch agent in ~/Library/LaunchAgents identical to the one in Home
