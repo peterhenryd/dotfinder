@@ -393,6 +393,15 @@ fn pkg_receipts(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// An installed cask that installs with a .pkg and declares no app, whose
+/// definition names the app's bundle ID. Some installers' receipts don't
+/// list the app at all (Microsoft's), so the receipt lookup misses them.
+fn pkg_cask_naming<'a>(id: &str, installed: &'a [InstalledCask]) -> Option<&'a InstalledCask> {
+    installed
+        .iter()
+        .find(|c| c.apps.is_empty() && mentions_id(&c.text, id))
+}
+
 fn parse_pkg_receipts(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|l| l.trim().strip_prefix("pkgid:"))
@@ -530,6 +539,7 @@ fn classify_app(
         installed
             .iter()
             .find(|c| receipts.iter().any(|r| mentions_id(&c.text, r)))
+            .or_else(|| pkg_cask_naming(&id, installed))
     };
     let mut renamed_from = None;
     let source = if p.contains("/Nix Apps/") || p.contains("/Home Manager Apps/") {
@@ -773,6 +783,34 @@ mod tests {
         assert_eq!(hidden.items.keys().collect::<Vec<_>>(), [".hidden"]);
         assert!(!dir_section(tmp.join("nope").to_str().unwrap(), false, &tmp).available);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pkg_casks_claim_apps_by_bundle_id() {
+        let cask = |token: &str, apps: &[&str], text: &str| InstalledCask {
+            token: token.into(),
+            apps: apps.iter().map(|a| a.to_string()).collect(),
+            text: text.into(),
+        };
+        let installed = [
+            // An app cask that mentions Word's ID doesn't claim Word.
+            cask(
+                "bookends",
+                &["Bookends.app"],
+                r#"{"zap":["~/Library/Application Scripts/com.microsoft.Word/x"]}"#,
+            ),
+            cask(
+                "microsoft-word",
+                &[],
+                r#"{"pkgutil":["com.microsoft.package.Microsoft_Word.app"],"zap":["~/Library/Containers/com.microsoft.Word*"]}"#,
+            ),
+        ];
+        assert_eq!(
+            pkg_cask_naming("com.microsoft.Word", &installed).map(|c| c.token.as_str()),
+            Some("microsoft-word")
+        );
+        assert!(pkg_cask_naming("com.microsoft.Excel", &installed).is_none());
+        assert!(pkg_cask_naming("", &installed).is_none());
     }
 
     #[test]
