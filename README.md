@@ -241,6 +241,17 @@ home folder, with `/` written as `::`, for example `.ssh::config`.
 `restore` keeps any existing copy that differs as `<name>.pre-restore`, and
 applies the configured permissions.
 
+Files whose paths shouldn't be public either go in a private list,
+`~/.local/share/dotfinder/vault-files.json`, in the same format as
+`vault.files`:
+
+```json
+{ "files": [{ "path": "~/.ssh/deploy", "mode": "600" }, { "path": "~/.local/bin/job", "mode": "755" }] }
+```
+
+Add that list itself to the config's `vault.files`. `restore` restores the
+config's files first, so on a new Mac the list is back before it's read.
+
 ## Building
 
 dotfinder has no dependencies beyond the Rust standard library: it reads

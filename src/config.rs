@@ -60,9 +60,41 @@ pub struct Vault {
     pub files: Vec<VaultFile>,
 }
 
+#[derive(Clone)]
 pub struct VaultFile {
     pub path: String,
     pub mode: u32,
+}
+
+/// A vault file list: paths, or `{"path": …, "mode": "644"}` objects
+/// (mode 600 when not given).
+pub fn parse_vault_files(files: Option<&Value>) -> Result<Vec<VaultFile>, String> {
+    files
+        .and_then(Value::as_arr)
+        .into_iter()
+        .flatten()
+        .map(|f| match f {
+            Value::Str(s) => Ok(VaultFile {
+                path: s.clone(),
+                mode: 0o600,
+            }),
+            Value::Obj(_) => Ok(VaultFile {
+                path: f
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or("vault file without `path`")?
+                    .to_string(),
+                mode: match f.get("mode") {
+                    Some(Value::Str(m)) => {
+                        u32::from_str_radix(m, 8).map_err(|_| format!("bad mode `{m}`"))?
+                    }
+                    None => 0o600,
+                    _ => return Err("vault file `mode` is an octal string like \"600\"".to_string()),
+                },
+            }),
+            _ => Err("vault files are strings or objects".to_string()),
+        })
+        .collect()
 }
 
 impl Config {
@@ -131,38 +163,7 @@ impl Config {
                     .and_then(Value::as_str)
                     .unwrap_or("dotfinder")
                     .to_string(),
-                files: vv
-                    .get("files")
-                    .and_then(Value::as_arr)
-                    .map(|fs| {
-                        fs.iter()
-                            .map(|f| match f {
-                                Value::Str(s) => Ok(VaultFile {
-                                    path: s.clone(),
-                                    mode: 0o600,
-                                }),
-                                Value::Obj(_) => Ok(VaultFile {
-                                    path: f
-                                        .get("path")
-                                        .and_then(Value::as_str)
-                                        .ok_or("vault file without `path`")?
-                                        .to_string(),
-                                    mode: match f.get("mode") {
-                                        Some(Value::Str(m)) => u32::from_str_radix(m, 8)
-                                            .map_err(|_| format!("bad mode `{m}`"))?,
-                                        None => 0o600,
-                                        _ => {
-                                            return Err("vault file `mode` is an octal string like \"600\""
-                                                .to_string());
-                                        }
-                                    },
-                                }),
-                                _ => Err("vault files are strings or objects".to_string()),
-                            })
-                            .collect::<Result<Vec<_>, String>>()
-                    })
-                    .transpose()?
-                    .unwrap_or_default(),
+                files: parse_vault_files(vv.get("files"))?,
             }),
             _ => None,
         };
